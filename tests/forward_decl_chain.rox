@@ -25,6 +25,7 @@ type Color enum:
   blue
 
 var c = Child()
+print(c.y)      // inherited default, read before any assignment
 c.x = 7
 c.y = 9
 print(c.x)

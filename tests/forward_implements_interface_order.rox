@@ -1,0 +1,16 @@
+// Concrete interface members must be inherited in implements-list order,
+// regardless of the order in which forward interface bodies complete. The
+// first listed interface wins a name conflict, as it does without forwards.
+type Impl object implements First, Second:
+  func ping():
+    pass
+
+type Second interface:
+  const X :int = 2
+  func ping()
+
+type First interface:
+  const X :int = 1
+  func ping()
+
+print(Impl.X)

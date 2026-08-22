@@ -3472,6 +3472,24 @@ bool VM::callValue(const Value& callee, const CallSpec& callSpec)
                                      toUTF8StdString(type->name) + "'");
                         return false;
                     }
+                    #ifdef DEBUG_BUILD
+                    // Extend copies ancestor properties into the subtype; the
+                    // compiler's forward re-linkage keeps that true for
+                    // forward-declared parents.  Detect any gap loudly rather
+                    // than let an instance silently lack an inherited field.
+                    for (ObjObjectType* anc = type->superType.isNil() ? nullptr : asObjectType(type->superType);
+                         anc; anc = anc->superType.isNil() ? nullptr : asObjectType(anc->superType)) {
+                        for (const auto& kv : anc->properties) {
+                            if (!type->properties.contains(kv.first)) {
+                                runtimeError("Internal: type '" + toUTF8StdString(type->name) +
+                                             "' lacks inherited property '" + toUTF8StdString(kv.second.name) +
+                                             "' of '" + toUTF8StdString(anc->name) +
+                                             "' (forward-declaration re-linkage gap)");
+                                return false;
+                            }
+                        }
+                    }
+                    #endif
                     // Walk the chain to the first level that defines init.
                     // If that level has multiple init overloads, resolve
                     // against the constructor call args.
@@ -5813,15 +5831,38 @@ void VM::extendEventType()
     ObjEventType* subType = asEventType(subVal);
 
     subType->superType = Value::objRef(superType);
-    subType->payloadProperties.clear();
-    subType->payloadProperties.reserve(superType->payloadProperties.size());
-    subType->propertyLookup.clear();
 
-    for (size_t i = 0; i < superType->payloadProperties.size(); ++i) {
-        const auto& prop = superType->payloadProperties[i];
-        subType->payloadProperties.push_back(prop);
-        subType->propertyLookup[prop.name.hashCode()] = i;
+    // Idempotent (re-run by the forward re-linkage once a forward-referenced
+    // super event has completed): parent payload first, then the sub's own
+    // fields -- any entry not present in the parent.  A same-named entry is the
+    // inherited copy from an earlier run and is refreshed from the parent.
+    //
+    // Built whole and then moved into place: PayloadProperty holds Values, and
+    // clearing the sub's vector first would leave the ones being carried over
+    // reachable only from this C++ local for the duration of the rebuild.
+    std::vector<ObjEventType::PayloadProperty> merged;
+    merged.reserve(superType->payloadProperties.size() + subType->payloadProperties.size());
+    std::unordered_map<int32_t, size_t> lookup;
+    for (const auto& prop : superType->payloadProperties) {
+        merged.push_back(prop);
+        lookup[prop.name.hashCode()] = merged.size() - 1;
     }
+    // Entries the sub declared itself start after the ones a previous run
+    // inherited -- a collision with the (now complete) super is the same
+    // duplicate defineEventProperty reports when the super is declared first.
+    for (size_t i = subType->inheritedPayloadCount; i < subType->payloadProperties.size(); ++i) {
+        const auto& prop = subType->payloadProperties[i];
+        if (lookup.contains(prop.name.hashCode()))
+            throw std::runtime_error("Duplicate event payload '" + toUTF8StdString(prop.name) +
+                                     "' declared in event '" + toUTF8StdString(subType->name) + "'");
+        merged.push_back(prop);
+        lookup[prop.name.hashCode()] = merged.size() - 1;
+    }
+    subType->payloadProperties = std::move(merged);
+    subType->propertyLookup = std::move(lookup);
+    // Everything present now pre-dates this event's own payload declarations,
+    // which the body emits next; a re-run treats the rest as user-declared.
+    subType->inheritedPayloadCount = subType->payloadProperties.size();
 }
 
 
@@ -10305,12 +10346,40 @@ std::pair<ExecutionStatus,Value> VM::execute(TimePoint deadline, size_t baseFram
                     return errorReturn;
                 }
 
-                // record inheritance relationship and copy properties
+                // Record the inheritance relationship and copy properties.
+                // Idempotent: the compiler re-runs this opcode once a
+                // forward-referenced super type's body has completed (see
+                // visit(File) forward re-linkage), so a re-run must converge on
+                // the state a single run in declaration order produces.
                 subType->superType = Value::objRef(superType);
-                subType->properties.insert(superType->properties.cbegin(), superType->properties.cend());
-                subType->propertyOrder.insert(subType->propertyOrder.end(),
-                                             superType->propertyOrder.begin(),
-                                             superType->propertyOrder.end());
+                for (const auto& kv : superType->properties) {
+                    auto existing = subType->properties.find(kv.first);
+                    if (existing == subType->properties.end()) {
+                        subType->properties.insert(kv);
+                        continue;
+                    }
+                    // Already present: either the inherited copy from an earlier
+                    // run (same declaring owner -- keep), or a name the sub declared
+                    // itself before the super's body arrived -- the same error
+                    // defineProperty raises when the super is complete first.
+                    bool sameOwner = existing->second.ownerType.isNil() || kv.second.ownerType.isNil()
+                                  || asObjectType(existing->second.ownerType) == asObjectType(kv.second.ownerType);
+                    if (!sameOwner) {
+                        runtimeError("Duplicate property '" + toUTF8StdString(kv.second.name) +
+                                     "' declared in type " + (subType->isActor ? "actor " : "object ") +
+                                     toUTF8StdString(subType->name));
+                        return errorReturn;
+                    }
+                }
+                {
+                    // parent-first, then the sub's own (non-inherited) names
+                    std::vector<int32_t> order(superType->propertyOrder.begin(), superType->propertyOrder.end());
+                    std::unordered_set<int32_t> seen(order.begin(), order.end());
+                    for (int32_t h : subType->propertyOrder)
+                        if (seen.insert(h).second)
+                            order.push_back(h);
+                    subType->propertyOrder = std::move(order);
+                }
                 subType->nestedTypes.insert(superType->nestedTypes.cbegin(), superType->nestedTypes.cend());
                 pop();
                 break;
@@ -10337,7 +10406,13 @@ std::pair<ExecutionStatus,Value> VM::execute(TimePoint deadline, size_t baseFram
                     return errorReturn;
                 }
 
-                implementer->implementedInterfaces.push_back(Value::objRef(iface));
+                // Idempotent (re-run by the forward re-linkage once a forward-
+                // referenced interface has completed): list each interface once.
+                bool alreadyListed = std::any_of(implementer->implementedInterfaces.begin(),
+                                                 implementer->implementedInterfaces.end(),
+                                                 [&](const Value& v) { return asObjectType(v) == iface; });
+                if (!alreadyListed)
+                    implementer->implementedInterfaces.push_back(Value::objRef(iface));
 
                 std::string err = checkInterfaceConformance(implementer, iface);
                 if (!err.empty()) {

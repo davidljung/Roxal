@@ -1,0 +1,10 @@
+// Bare member names resolve through two forward-referenced ancestor levels.
+type C object extends B:
+  func sum() -> int:
+    return a + b
+type B object extends A:
+  var b :int = 2
+type A object:
+  var a :int = 1
+
+print(C().sum())

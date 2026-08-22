@@ -332,6 +332,11 @@ tests = [
     'stack_depth_check', 'dispatch_rare_interleave',
     'forward_decl_field', 'forward_decl_chain', 'forward_decl_module_var',
     'forward_extends_property', 'forward_implements_incomplete_err',
+    'forward_extends_chain', 'forward_extends_init_order', 'forward_event_extends',
+    'forward_iface_extends_iface_err', 'forward_nested_in_toplevel', 'forward_implements_const_inherit', 'forward_extends_actor',
+    'forward_extends_bare_member', 'forward_extends_chain_bare', 'forward_nested_in_toplevel_bare',
+    'forward_import_registry_collision', 'forward_implements_interface_order',
+    'forward_event_duplicate_payload',
     'actor_member_modvar_collision'
 ]
 
@@ -480,9 +485,7 @@ doom_tests = ['doom_wad', 'doom_gfx', 'doom_render', 'doom_game', 'doom_sound', 
 
 # implementation doesn't yet allow these tests to pass (do not add to this list without human consent)
 # name-resolution-issues.md: these encode the CORRECT behaviour for known bugs
-# 3+4 forward extends+implements
 failing_tests = [
-    'forward_extends_property', 'forward_implements_incomplete_err',
 ]
 assert(set(failing_tests).issubset(set(tests) | set(long_running_tests)))
 
@@ -975,6 +978,12 @@ try:
             cmd = [roxal, '--ast', rel_testrox]
         elif test.startswith('check_'):
             cmd = [roxal, '--check', rel_testrox]
+        if test == 'forward_import_registry_collision':
+            # This regression is specifically in the source-compilation path:
+            # compiling the imported helper recursively overwrites the outer
+            # file's pre-registered member entry.  A cached helper bypasses
+            # that path and would make the known bug appear fixed.
+            cmd = [cmd[0], '--recompile', *cmd[1:]]
         if test == 'cmdline_execute':
             with open(testrox, 'r') as f:
                 snippet = f.read().strip()

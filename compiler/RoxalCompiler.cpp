@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <algorithm>
 #include <functional>
 #include <sstream>
 #include <unordered_map>
@@ -83,7 +84,7 @@ static unsigned long currentProcessId()
     return static_cast<unsigned long>(::getpid());
 #endif
 }
-constexpr std::uint32_t ModuleCacheVersion = 55;   // 55: inner locals/params/members shadow outer compile-time consts (no longer inlined)
+constexpr std::uint32_t ModuleCacheVersion = 56;   // 56: forward-declared type re-linkage (Extend/Implements re-emitted after the referenced body)
 
 std::filesystem::path moduleCachePathFor(const std::filesystem::path& sourcePath) {
     if (sourcePath.empty())
@@ -1002,9 +1003,272 @@ std::any RoxalCompiler::visit(ptr<ast::File> ast)
         }
     }
 
-    ast->acceptChildren(*this, results);
+    // Forward-declaration support, compile-time half: member names of every
+    // top-level type are known before any body compiles (see the method).
+    preRegisterTypeMembers(ast->declsOrStmts);
+
+    // Forward-declaration re-linkage graph (see buildTypeLinkGraph).
+    auto linkNodes = buildTypeLinkGraph(ast->declsOrStmts);
+    std::unordered_map<const ast::TypeDecl*, size_t> topLevelNode;
+    for (size_t i = 0; i < linkNodes.size(); ++i)
+        if (!linkNodes[i].enclosing.has_value())
+            topLevelNode[linkNodes[i].decl.get()] = i;
+
+    // Same traversal as ast->acceptChildren(), with the re-link hook after
+    // each top-level type declaration.
+    for (auto& annot : ast->annotations)
+        results.push_back(annot->accept(*this));
+    for (auto& import : ast->imports)
+        results.push_back(import->accept(*this));
+    for (auto& declOrStmt : ast->declsOrStmts) {
+        if (std::holds_alternative<ptr<Declaration>>(declOrStmt)) {
+            auto decl = std::get<ptr<Declaration>>(declOrStmt);
+            results.push_back(decl->accept(*this));
+            if (auto typeDecl = dynamic_ptr_cast<ast::TypeDecl>(decl)) {
+                auto it = topLevelNode.find(typeDecl.get());
+                if (it != topLevelNode.end())
+                    emitForwardTypeRelink(linkNodes, it->second);
+                currentNode = ast;
+            }
+        }
+        else if (std::holds_alternative<ptr<Statement>>(declOrStmt))
+            results.push_back(std::get<ptr<Statement>>(declOrStmt)->accept(*this));
+        else
+            throw std::runtime_error("unimplemented accept() alternative");
+    }
     emitReturn();
     return {};
+}
+
+
+ordered_map<ustring, RoxalCompiler::TypeScope::MemberInfo>*
+RoxalCompiler::findTypeMembers(const ustring& typeName)
+{
+    auto& registry = asModuleScope(moduleScope())->typePropertyRegistry;
+    auto it = registry.find(typeName);
+    return it == registry.end() ? nullptr : &it->second;
+}
+
+void RoxalCompiler::registerTypeMembers(const ustring& typeName,
+                                        const ordered_map<ustring, TypeScope::MemberInfo>& members)
+{
+    asModuleScope(moduleScope())->typePropertyRegistry[typeName] = members;
+}
+
+
+void RoxalCompiler::preRegisterTypeMembers(
+    const std::vector<std::variant<ptr<ast::Declaration>, ptr<ast::Statement>>>& declsOrStmts)
+{
+    std::vector<ptr<ast::TypeDecl>> topLevel;
+    std::unordered_map<ustring, ptr<ast::TypeDecl>> byName;
+    for (const auto& declOrStmt : declsOrStmts) {
+        if (!std::holds_alternative<ptr<Declaration>>(declOrStmt))
+            continue;
+        auto typeDecl = dynamic_ptr_cast<ast::TypeDecl>(std::get<ptr<Declaration>>(declOrStmt));
+        if (!typeDecl)
+            continue;
+        topLevel.push_back(typeDecl);
+        byName[typeDecl->name] = typeDecl;
+    }
+
+    // The entries mirror, one for one, what visit(TypeDecl) registers into
+    // TypeScope::propertyNames (then saves to the registry) -- keep in step.
+    std::unordered_map<ustring, int> state;   // 0 new, 1 visiting (cycle guard), 2 done
+    std::function<void(const ptr<ast::TypeDecl>&)> reg = [&](const ptr<ast::TypeDecl>& decl) {
+        int& st = state[decl->name];
+        if (st != 0) return;
+        st = 1;
+        const ustring& typeName = decl->name;
+        bool isInterface = decl->kind == ast::TypeDecl::Interface;
+        bool isEvent = decl->kind == ast::TypeDecl::Event;
+        ordered_map<ustring, TypeScope::MemberInfo> members;
+
+        // inherited first (insert: own declarations below override)
+        if (decl->extends.has_value()) {
+            auto superName = joinTypeName(decl->extends.value());
+            auto superIt = byName.find(superName);
+            if (superIt != byName.end())
+                reg(superIt->second);                    // closes over in-file extends
+            if (auto* superMembers = findTypeMembers(superName))
+                for (const auto& kv : *superMembers)
+                    members.insert(kv);
+        }
+
+        for (const auto& prop : decl->properties) {
+            if (isInterface && !prop->initializer.has_value()) {
+                // `var X :T` in an interface: abstract get+set sugar
+                members[prop->name] = {prop->access, typeName, /*isConst=*/false, prop->varType};
+                members[ustring("__get_") + prop->name] = {prop->access, typeName, /*isConst=*/false};
+                members[ustring("__set_") + prop->name] = {prop->access, typeName, /*isConst=*/false};
+            } else {
+                members[prop->name] = {prop->access, typeName, prop->isConst, prop->varType};
+            }
+        }
+        if (!isEvent) {
+            for (const auto& nested : decl->nestedTypes)
+                members[nested->name] = {nested->access, typeName, /*isConst=*/true};
+            for (const auto& func : decl->methods)
+                if (func->name.has_value())
+                    members[func->name.value()] = {func->access, typeName, /*isConst=*/false};
+            for (const auto& acc : decl->propertyAccessors) {
+                if (!isInterface)
+                    members[ustring("_") + acc->name] = {Access::Private, typeName, /*isConst=*/false};
+                members[acc->name] = {acc->access, typeName, /*isConst=*/false};
+                if (acc->getter.has_value())
+                    members[ustring("__get_") + acc->name] = {acc->access, typeName, /*isConst=*/false};
+                if (acc->setter.has_value())
+                    members[ustring("__set_") + acc->name] = {acc->access, typeName, /*isConst=*/false};
+            }
+        }
+        registerTypeMembers(typeName, members);
+        st = 2;
+    };
+    for (const auto& decl : topLevel)
+        reg(decl);
+}
+
+
+std::vector<RoxalCompiler::TypeLinkNode> RoxalCompiler::buildTypeLinkGraph(
+    const std::vector<std::variant<ptr<ast::Declaration>, ptr<ast::Statement>>>& declsOrStmts)
+{
+    std::vector<TypeLinkNode> nodes;
+
+    // Collect: top-level TypeDecls and, recursively, their nested types.
+    std::function<void(const ptr<ast::TypeDecl>&, const ast::TypeName&, size_t, std::optional<size_t>)> collect =
+        [&](const ptr<ast::TypeDecl>& decl, const ast::TypeName& prefix, size_t position, std::optional<size_t> enclosing) {
+            TypeLinkNode n;
+            n.decl = decl;
+            n.qualifiedName = prefix;
+            n.qualifiedName.push_back(decl->name);
+            n.position = position;
+            n.enclosing = enclosing;
+            nodes.push_back(n);
+            size_t self = nodes.size() - 1;
+            for (const auto& nested : decl->nestedTypes)
+                collect(nested, nodes[self].qualifiedName, position, self);
+        };
+    for (size_t i = 0; i < declsOrStmts.size(); ++i) {
+        if (!std::holds_alternative<ptr<Declaration>>(declsOrStmts[i]))
+            continue;
+        auto typeDecl = dynamic_ptr_cast<ast::TypeDecl>(std::get<ptr<Declaration>>(declsOrStmts[i]));
+        if (typeDecl)
+            collect(typeDecl, {}, i, std::nullopt);
+    }
+
+    // Resolve a TypeName written inside node `from` to a node index, mirroring
+    // how a bare type name resolves in a type body: nested types of the
+    // enclosing types (innermost first), then top-level types.  Anything else
+    // (imported, builtin, undefined) is not a declared-here type and gets no
+    // edge -- it is either already complete or fails loudly as today.
+    auto childNamed = [&](std::optional<size_t> enclosing, const ustring& name) -> std::optional<size_t> {
+        for (size_t j = 0; j < nodes.size(); ++j)
+            if (nodes[j].enclosing == enclosing && nodes[j].decl->name == name)
+                return j;
+        return std::nullopt;
+    };
+    auto resolve = [&](size_t from, const ast::TypeName& tn) -> std::optional<size_t> {
+        if (tn.empty()) return std::nullopt;
+        std::optional<size_t> base;
+        for (auto enc = nodes[from].enclosing; enc.has_value() && !base.has_value(); enc = nodes[*enc].enclosing)
+            base = childNamed(enc, tn[0]);
+        if (!base.has_value())
+            base = childNamed(std::nullopt, tn[0]);
+        for (size_t k = 1; k < tn.size() && base.has_value(); ++k)
+            base = childNamed(base, tn[k]);
+        return base;
+    };
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i].decl->extends.has_value())
+            nodes[i].extendsNode = resolve(i, nodes[i].decl->extends.value());
+        for (const auto& iface : nodes[i].decl->implements)
+            if (auto t = resolve(i, iface))
+                nodes[i].implementsNodes.push_back(*t);
+    }
+    return nodes;
+}
+
+
+void RoxalCompiler::emitForwardTypeRelink(const std::vector<TypeLinkNode>& nodes, size_t completed)
+{
+    const size_t limit = nodes[completed].position;   // only earlier (or nested-in-this) declarations
+    auto eligible = [&](size_t n) { return n != completed && nodes[n].position <= limit; };
+
+    // Edges of `n` that stay within the eligible set (or hit `completed`).
+    auto targets = [&](size_t n) {
+        std::vector<size_t> out;
+        if (nodes[n].extendsNode.has_value()) out.push_back(*nodes[n].extendsNode);
+        out.insert(out.end(), nodes[n].implementsNodes.begin(), nodes[n].implementsNodes.end());
+        std::vector<size_t> kept;
+        for (size_t t : out)
+            if (t == completed || eligible(t)) kept.push_back(t);
+        return kept;
+    };
+
+    // reaches(n): does `completed` lie downstream of n via eligible edges?
+    std::vector<int> reachMemo(nodes.size(), -1);   // -1 unknown, 0 no, 1 yes, 2 in progress
+    std::function<bool(size_t)> reaches = [&](size_t n) -> bool {
+        if (n == completed) return true;
+        if (reachMemo[n] == 1) return true;
+        if (reachMemo[n] == 0 || reachMemo[n] == 2) return false;   // 2: cycle guard
+        reachMemo[n] = 2;
+        bool r = false;
+        for (size_t t : targets(n))
+            if (reaches(t)) { r = true; break; }
+        reachMemo[n] = r ? 1 : 0;
+        return r;
+    };
+
+    std::vector<size_t> dependents;
+    for (size_t n = 0; n < nodes.size(); ++n)
+        if (eligible(n) && reaches(n))
+            dependents.push_back(n);
+    if (dependents.empty())
+        return;
+
+    // Ancestors before descendants: DFS post-order over edges inside the set.
+    std::vector<size_t> order;
+    std::vector<int> state(nodes.size(), 0);          // 0 unvisited, 1 visiting, 2 done
+    std::function<void(size_t)> visitNode = [&](size_t n) {
+        if (state[n] != 0) return;
+        state[n] = 1;
+        for (size_t t : targets(n))
+            if (t != completed && reachMemo[t] == 1)
+                visitNode(t);
+        state[n] = 2;
+        order.push_back(n);
+    };
+    for (size_t n : dependents)
+        visitNode(n);
+
+    auto savedNode = currentNode;
+    for (size_t n : order) {
+        const auto& node = nodes[n];
+        currentNode = node.decl;      // line attribution (and any conformance error) to this declaration
+        std::string who = toUTF8StdString(joinTypeName(node.qualifiedName));
+        if (node.extendsNode.has_value()) {
+            emitTypeName(nodes[*node.extendsNode].qualifiedName);           // super
+            emitTypeName(node.qualifiedName);                               // sub
+            emitByte(node.decl->kind == ast::TypeDecl::Event ? OpCode::EventExtend : OpCode::Extend,
+                     "forward re-link extends " + who);
+            emitByte(OpCode::Pop, "forward re-link super");
+        }
+        // Interface members are copied insert-if-absent, and the interface
+        // listed first must win a name conflict -- so the list is re-emitted
+        // as a whole, in source order, only once EVERY listed interface has
+        // completed.  Emitting as each one completes would let completion
+        // order decide the winner instead of declaration order.
+        bool allInterfacesComplete =
+            std::all_of(node.implementsNodes.begin(), node.implementsNodes.end(),
+                        [&](size_t t) { return nodes[t].position <= limit; });
+        if (allInterfacesComplete) {
+            for (size_t t : node.implementsNodes) {
+                emitTypeName(nodes[t].qualifiedName);                       // interface
+                emitTypeName(node.qualifiedName);                           // implementer
+                emitByte(OpCode::Implements, "forward re-link implements " + who);
+            }
+        }
+    }
+    currentNode = savedNode;
 }
 
 
@@ -1466,9 +1730,8 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
 
         if (ast->extends.has_value()) {
             auto superName = joinTypeName(ast->extends.value());
-            auto it = typePropertyRegistry.find(superName);
-            if (it != typePropertyRegistry.end())
-                for (const auto& kv : it->second)
+            if (auto* superMembers = findTypeMembers(superName))
+                for (const auto& kv : *superMembers)
                     asTypeScope(typeScope())->propertyNames.insert(kv);
         }
 
@@ -1547,7 +1810,7 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
         if (asTypeScope(typeScope())->hasSuperType)
             exitLocalScope();
 
-        typePropertyRegistry[ast->name] = asTypeScope(typeScope())->propertyNames;
+        registerTypeMembers(ast->name, asTypeScope(typeScope())->propertyNames);
 
         exitTypeScope();
         return {};
@@ -1580,9 +1843,8 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
     // inherit property registry from super type if available
     if (ast->extends.has_value()) {
         auto superName = joinTypeName(ast->extends.value());
-        auto it = typePropertyRegistry.find(superName);
-        if (it != typePropertyRegistry.end())
-            for (const auto& kv : it->second)
+        if (auto* superMembers = findTypeMembers(superName))
+            for (const auto& kv : *superMembers)
                 asTypeScope(typeScope())->propertyNames.insert(kv);
     }
 
@@ -2300,7 +2562,7 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
         exitLocalScope();
 
     // record collected property names for this type for use by derived types
-    typePropertyRegistry[ast->name] = asTypeScope(typeScope())->propertyNames;
+    registerTypeMembers(ast->name, asTypeScope(typeScope())->propertyNames);
 
     exitTypeScope();
 
@@ -5007,10 +5269,9 @@ std::any RoxalCompiler::visit(ptr<ast::UnaryOp> ast)
 
         // check access of member in super type
         auto superName = joinTypeName(asTypeScope(typeScope())->superTypeName);
-        auto itType = typePropertyRegistry.find(superName);
-        if (itType != typePropertyRegistry.end()) {
-            auto itMem = itType->second.find(ast->member.value());
-            if (itMem != itType->second.end() && itMem->second.access == Access::Private)
+        if (auto* superMembers = findTypeMembers(superName)) {
+            auto itMem = superMembers->find(ast->member.value());
+            if (itMem != superMembers->end() && itMem->second.access == Access::Private)
                 error("Cannot access private member '"+toUTF8StdString(ast->member.value())+"' of super type");
         }
 
@@ -5048,10 +5309,9 @@ std::any RoxalCompiler::visit(ptr<ast::UnaryOp> ast)
                 }
 
                 // Check type registry for inherited properties or access control
-                auto itType = typePropertyRegistry.find(asTypeScope(typeScope())->name);
-                if (itType != typePropertyRegistry.end()) {
-                    auto itMem = itType->second.find(ast->member.value());
-                    if (itMem != itType->second.end()) {
+                if (auto* ownMembers = findTypeMembers(asTypeScope(typeScope())->name)) {
+                    auto itMem = ownMembers->find(ast->member.value());
+                    if (itMem != ownMembers->end()) {
                         const auto& info = itMem->second;
                         if (info.access == Access::Private && info.owner != asTypeScope(typeScope())->name)
                             error("Cannot access private member '"+toUTF8StdString(ast->member.value())+"'");
@@ -5426,12 +5686,12 @@ std::any RoxalCompiler::visit(ptr<ast::Call> ast)
             std::vector<ustring> publicProps;
 
             // Look up the type in the property registry to check access levels
-            auto typeIt = typePropertyRegistry.find(objType.name);
-            if (typeIt != typePropertyRegistry.end()) {
+            auto* typeMembers = findTypeMembers(objType.name);
+            if (typeMembers) {
                 for (const auto& prop : objType.properties) {
                     // Check if this property is public
-                    auto propIt = typeIt->second.find(prop.name);
-                    if (propIt != typeIt->second.end() && propIt->second.access == ast::Access::Public) {
+                    auto propIt = typeMembers->find(prop.name);
+                    if (propIt != typeMembers->end() && propIt->second.access == ast::Access::Public) {
                         publicProps.push_back(prop.name);
                     }
                 }

@@ -1,0 +1,13 @@
+// A forward-referenced actor supertype contributes its properties: an
+// inherited method reads an inherited property on the subtype's instance.
+type Worker actor extends BaseActor:
+  private var w :int = 2
+type BaseActor actor:
+  private var base :int = 1
+  func getBase() -> int:
+    return base
+
+var a = Worker()
+var r = a.getBase()
+wait(for=r)
+print(string(r))

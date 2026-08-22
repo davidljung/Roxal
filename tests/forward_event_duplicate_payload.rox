@@ -1,0 +1,10 @@
+// A child payload that duplicates a forward parent's payload is an error,
+// exactly as it is when the parent is declared first. Re-linking must not
+// mistake the child's own declaration for an earlier inherited copy.
+type Child event extends Base:
+  var x :int = 2
+
+type Base event:
+  var x :int = 1
+
+print(Child().x)

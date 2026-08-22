@@ -1,0 +1,5 @@
+// Its unqualified type name deliberately collides with the forward parent in
+// forward_import_registry_collision.rox. Its members must not leak into that
+// file's compile-time type-member registry.
+type Base object:
+  var wrong :int = 9

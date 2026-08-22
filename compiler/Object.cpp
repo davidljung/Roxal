@@ -3284,6 +3284,9 @@ void ObjEventType::read(std::istream& in, roxal::ptr<SerializationContext> ctx)
         payloadProperties.push_back({ propName, typeValue, initial });
         propertyLookup[propName.hashCode()] = payloadProperties.size() - 1;
     }
+    // A deserialized event type is fully declared; none of it is a pending
+    // own-declaration awaiting a duplicate check (see extendEventType).
+    inheritedPayloadCount = payloadProperties.size();
 
     uint32_t subCount; in.read(reinterpret_cast<char*>(&subCount), 4);
     subscribers.clear();
@@ -6201,6 +6204,9 @@ unique_ptr<ObjEventType, UnreleasedObj> roxal::newEventTypeObj(const ustring& na
     ObjEventType::PayloadProperty targetProp { toUnicodeString("target"), Value::nilVal(), Value::nilVal() };
     eventType->payloadProperties.push_back(targetProp);
     eventType->propertyLookup[targetProp.name.hashCode()] = 0;
+    // Nothing here is a user declaration: the boundary extendEventType() uses to
+    // tell this event's own payload from inherited entries starts past 'target'.
+    eventType->inheritedPayloadCount = eventType->payloadProperties.size();
 
     return eventType;
 }

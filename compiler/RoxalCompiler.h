@@ -477,10 +477,12 @@ protected:
 
     ptr<TypeScope> asTypeScope(Scope s) const { return dynamic_ptr_cast<TypeScope>(*s); }
 
-    // map type name -> registered member names (properties and methods);
-    // inner map preserves declaration order.
-    std::unordered_map<ustring,
-                       ordered_map<ustring, TypeScope::MemberInfo>> typePropertyRegistry;
+    // Compile-time member registry of the module currently being compiled
+    // (see ModuleScope::typePropertyRegistry).  nullptr when the type is not
+    // registered in this module.
+    ordered_map<ustring, TypeScope::MemberInfo>* findTypeMembers(const ustring& typeName);
+    void registerTypeMembers(const ustring& typeName,
+                             const ordered_map<ustring, TypeScope::MemberInfo>& members);
 
 
     struct ModuleScope : public FunctionScope
@@ -530,6 +532,15 @@ protected:
         ustring packageName;
         ustring moduleName;
         ustring sourceName;
+        // map type name -> registered member names (properties and methods);
+        // inner map preserves declaration order.  Owned by the module, not the
+        // compiler: compiling an import re-enters compile() on this same
+        // compiler and pushes its own ModuleScope, so a same-named type in the
+        // imported module must not overwrite this module's entry.  MemberInfo
+        // holds no Value, so this needs no GC tracing.
+        std::unordered_map<ustring,
+                           ordered_map<ustring, TypeScope::MemberInfo>> typePropertyRegistry;
+
         Value moduleType;  // allowed-raw: traced via traceValues (ObjModuleType)
         std::unordered_map<ustring, VarTypeSpec> moduleVarTypes;
         std::unordered_set<ustring> moduleVarTypeConst; // vars declared as var x: const T
@@ -663,6 +674,32 @@ protected:
     int16_t resolveLocal(Scope scopeState, const ustring& name);
     int addUpvalue(Scope scopeState, uint8_t index, bool isLocal);
     int16_t resolveUpvalue(Scope scopeState, const ustring& name);
+    // ---- forward-declared type linkage ----
+    // Top-level type names are forward-referenceable through the placeholders
+    // visit(File) pre-walks, but Extend / Implements / EventExtend snapshot the
+    // referenced type when they run.  After each top-level type body completes,
+    // the linkage of every earlier declaration (top-level or nested) that
+    // transitively depends on it is re-emitted; the opcodes are idempotent, so
+    // this converges on the state a declaration-order program would have.
+    struct TypeLinkNode {
+        ptr<ast::TypeDecl> decl;
+        ast::TypeName qualifiedName;           // [Name] top-level, [Outer, .., Name] nested
+        size_t position;                       // index of the owning top-level decl in declsOrStmts
+        std::optional<size_t> enclosing;       // node index of the enclosing type, if nested
+        std::optional<size_t> extendsNode;     // edges to declared-here types only
+        std::vector<size_t> implementsNodes;
+    };
+    std::vector<TypeLinkNode> buildTypeLinkGraph(
+        const std::vector<std::variant<ptr<ast::Declaration>, ptr<ast::Statement>>>& declsOrStmts);
+    void emitForwardTypeRelink(const std::vector<TypeLinkNode>& nodes, size_t completed);
+    // Compile-time half of forward declarations: visit(TypeDecl) seeds a
+    // child's propertyNames from typePropertyRegistry[super], which is only
+    // filled when the super's body compiles.  Pre-register every top-level
+    // type's members from the AST (closed over in-file `extends`) before any
+    // body compiles, so bare inherited names resolve in a forward child too.
+    void preRegisterTypeMembers(
+        const std::vector<std::variant<ptr<ast::Declaration>, ptr<ast::Statement>>>& declsOrStmts);
+
     // Side-effect-free discovery of what `name` resolves to, ignoring consts.
     // Walks the same branches as namedVariable(), in the same order, but does
     // not emit and does not capture upvalues.

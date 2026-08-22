@@ -1,0 +1,10 @@
+// Positional init takes parent properties first, identically whether the
+// parent is declared before or after the child.
+type Derived object extends Base:
+  var b :int = 0
+type Base object:
+  var a :int = 0
+
+var d = Derived(1, 2)
+print(d.a)
+print(d.b)

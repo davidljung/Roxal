@@ -1,0 +1,16 @@
+// Interface consts are inherited (Java-style) by an implementer even when the
+// interface is declared later, and flow on to the implementer's subtypes.
+type Impl object implements Iface:
+  func ping():
+    print("ping")
+type Sub object extends Impl:
+  var s :int = 0
+
+type Iface interface:
+  const MAX :int = 42
+  func ping()
+
+print(Impl.MAX)
+print(Sub.MAX)
+print(Sub().MAX)
+print(Sub() is Iface)

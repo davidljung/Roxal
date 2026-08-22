@@ -1,0 +1,10 @@
+// A nested type that extends a later top-level type is re-linked too.
+type Outer object:
+  type Inner object extends Base:
+    var i :int = 1
+type Base object:
+  var b :int = 2
+
+var x = Outer.Inner()
+print(x.b)
+print(x.i)

@@ -1415,6 +1415,14 @@ struct ObjEventType : public Obj {
     std::vector<PayloadProperty> payloadProperties;
     std::unordered_map<int32_t, size_t> propertyLookup;
 
+    // How many leading payloadProperties entries came from the super type the
+    // last time extendEventType() ran.  Lets a re-run (the compiler re-emits
+    // EventExtend once a forward-declared super event's body has completed)
+    // tell an inherited copy from a field this event declared itself, so a
+    // genuine duplicate is still reported.  Transient per module execution;
+    // not serialized.
+    size_t inheritedPayloadCount { 0 };
+
     // list of subscribed handler closures (weak references)
     std::vector<Value> subscribers;
 

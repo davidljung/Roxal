@@ -1,0 +1,16 @@
+// Inside a child's methods, bare names of a forward-referenced parent's
+// properties and methods must resolve as members (this.name), not as module
+// variables.
+type Derived object extends Base:
+  func show():
+    print(a)
+    a = a + 1
+    print(a)
+    hello()
+
+type Base object:
+  var a :int = 1
+  func hello():
+    print("hello from Base")
+
+Derived().show()

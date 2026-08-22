@@ -1,0 +1,13 @@
+// Conformance must be re-checked when a forward-referenced interface's own
+// forward-referenced super-interface completes.
+type Impl object implements Iface:
+  func go():
+    print("go")
+
+type Iface interface extends Super:
+  func go()
+
+type Super interface:
+  func missing()
+
+Impl().go()

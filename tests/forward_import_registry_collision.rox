@@ -1,0 +1,13 @@
+// Compiling an import must not replace the pre-registered members of a
+// same-named, local forward parent. This test is forced through source
+// compilation by runtests.py so an imported-module cache cannot mask the bug.
+import forward_import_registry_collision_helper
+
+type Derived object extends Base:
+  func get() -> int:
+    return right
+
+type Base object:
+  var right :int = 1
+
+print(Derived().get())

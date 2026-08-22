@@ -1,0 +1,9 @@
+// A nested type's method uses a bare name of its later top-level parent.
+type Outer object:
+  type Inner object extends Base:
+    func get() -> int:
+      return b
+type Base object:
+  var b :int = 2
+
+print(Outer.Inner().get())

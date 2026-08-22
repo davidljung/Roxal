@@ -1,0 +1,14 @@
+// A chain of forward-referenced supertypes must contribute every ancestor's
+// properties (re-linkage cascades ancestors-first).
+type C object extends B:
+  var c :int = 3
+type B object extends A:
+  var b :int = 2
+type A object:
+  var a :int = 1
+
+var x = C()
+print(x.a)
+print(x.b)
+print(x.c)
+print(x is A)

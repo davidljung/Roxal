@@ -1,0 +1,9 @@
+// A forward-referenced parent event contributes its payload fields.
+type Child event extends Base:
+  var c :int = 1
+type Base event:
+  var b :int = 2
+
+var e = Child()
+print(e.b)
+print(e.c)
