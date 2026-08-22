@@ -1,0 +1,11 @@
+// An inner-block var must beat a function-level const of the same name
+// (same function scope, deeper block), and the const is back after the block.
+func f():
+  const n = 7
+  if true:
+    var n = 1
+    n = n + 1
+    print(n)
+  print(n)
+
+f()

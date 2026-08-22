@@ -1,0 +1,11 @@
+// An enclosing function's local must beat a module-level const of the same
+// name when read from a nested function (upvalue).
+const n = 7
+
+func a():
+  var n = 1
+  func b():
+    print(n)
+  b()
+
+a()

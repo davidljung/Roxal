@@ -190,7 +190,7 @@ tests = [
     'jump_if_clause', 'jump_locals_cleanup', 'typededucer_jump_label',
     'jump_undefined', 'jump_into_block', 'jump_skips_var', 'jump_cross_try',
     'match_simple', 'match_3cases', 'match_repeated', 'match_basic', 'match_enum',
-    'with_enum_test', 'with_object_test',
+    'with_enum_test', 'with_object_test', 'with_object_method', 'with_method_assign_err',
     'func_param_default', 'func_param_default2', 'func_param_default3','func_param_default4',
     'variadic', 'variadic_format', 'variadic_no_comma',
     'typeobj1', 'typeobj2', 'typeobj3', 'typeobj4', 'typeobj5', 'typeobj6', 'typeobj7',
@@ -215,6 +215,10 @@ tests = [
     'const_member_type_access', 'const_member_type_var_err', 'const_member_type_mutable_err', 'const_member_type_private_err',
     'const_member_freeze', 'const_member_shared', 'const_member_untyped_freeze',
     'const_shadow_param', 'const_shadow_local', 'const_shadow_member',
+    'const_shadow_upvalue', 'const_shadow_inner_const', 'const_shadow_block_var',
+    'const_shadow_block_const', 'const_shadow_closure_member', 'const_shadow_const_init',
+    'const_shadow_type_member_init', 'const_shadow_const_member', 'const_shadow_selfinit',
+    'const_shadow_param_assign_err',
     'nested_type_enum', 'nested_type_object', 'nested_type_inherit',
     'nested_type_extends', 'nested_type_implements',
     'nested_type_implements_deep',
@@ -476,9 +480,8 @@ doom_tests = ['doom_wad', 'doom_gfx', 'doom_render', 'doom_game', 'doom_sound', 
 
 # implementation doesn't yet allow these tests to pass (do not add to this list without human consent)
 # name-resolution-issues.md: these encode the CORRECT behaviour for known bugs
-# 1 const shadows inner bindings / 3+4 forward extends+implements
+# 3+4 forward extends+implements
 failing_tests = [
-    'const_shadow_param', 'const_shadow_local', 'const_shadow_member',
     'forward_extends_property', 'forward_implements_incomplete_err',
 ]
 assert(set(failing_tests).issubset(set(tests) | set(long_running_tests)))

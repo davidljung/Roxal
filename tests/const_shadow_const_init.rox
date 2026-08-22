@@ -1,0 +1,9 @@
+// A const initializer that names a shadowing parameter must take the parameter
+// (runtime const), not fold to the module-level const of the same name.
+const n = 7
+
+func f(n :int):
+  const m = n
+  print(m)
+
+f(3)

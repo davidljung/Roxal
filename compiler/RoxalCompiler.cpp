@@ -83,7 +83,7 @@ static unsigned long currentProcessId()
     return static_cast<unsigned long>(::getpid());
 #endif
 }
-constexpr std::uint32_t ModuleCacheVersion = 54;   // 54: @strict module functions require an explicit 'var' declaration before assignment
+constexpr std::uint32_t ModuleCacheVersion = 55;   // 55: inner locals/params/members shadow outer compile-time consts (no longer inlined)
 
 std::filesystem::path moduleCachePathFor(const std::filesystem::path& sourcePath) {
     if (sourcePath.empty())
@@ -2726,7 +2726,9 @@ std::any RoxalCompiler::visit(ptr<ast::VarDecl> ast)
                     initIsConst = asFuncScope(funcScope())->locals[localIdx].isConst;
                 } else {
                     // Runtime const = in moduleConstLines but NOT a compile-time const binding
-                    // (compile-time consts are primitives with value semantics, safe to copy)
+                    // (compile-time consts are primitives with value semantics, safe to copy).
+                    // Intentionally the raw lookup: this asks about the module-level
+                    // binding specifically, not what the name resolves to here.
                     initIsConst = moduleConstExists(varExpr->name)
                                   && !lookupConstBinding(varExpr->name);
                 }
@@ -4684,7 +4686,8 @@ std::any RoxalCompiler::visit(ptr<ast::Assignment> ast)
                     if (rhsLocalIdx >= 0)
                         rhsIsConst = asFuncScope(funcScope())->locals[rhsLocalIdx].isConst;
                     else {
-                        // Runtime const = in moduleConstLines but NOT a compile-time const binding
+                        // Runtime const = in moduleConstLines but NOT a compile-time const binding.
+                        // Intentionally the raw lookup (see the VarDecl twin above).
                         rhsIsConst = moduleConstExists(varExpr->name)
                                      && !lookupConstBinding(varExpr->name);
                     }
@@ -5106,6 +5109,10 @@ std::any RoxalCompiler::visit(ptr<ast::Call> ast)
     // For lvalue args, emits MoveLocal/MoveModuleVar/MoveProp.
     // For non-lvalue args (temporaries), evaluates normally (already sole-owner).
     if (auto callVar = dynamic_ptr_cast<ast::Variable>(ast->callable)) {
+        // Intentionally the raw const lookup: with the shadowing-aware one, a
+        // local `move` hiding an outer `const move` would make the intrinsic
+        // fire and override the local.  (That ordinary bindings do not shadow
+        // the intrinsic at all is pre-existing and separate.)
         if (callVar->name == toUnicodeString("move") && ast->args.size() == 1 && !lookupConstBinding(callVar->name)) {
             auto& argExpr = ast->args[0].second;
 
@@ -5141,7 +5148,8 @@ std::any RoxalCompiler::visit(ptr<ast::Call> ast)
                         }
                     }
                 }
-                // Module variable
+                // Module variable.  Raw lookup is fine here: local / upvalue /
+                // member have all failed above, so no inner binding can shadow.
                 if (!lookupConstBinding(varArg->name)) {
                     if (moduleConstExists(varArg->name))
                         error("Cannot move const variable '" + toUTF8StdString(varArg->name) + "'");
@@ -6372,6 +6380,8 @@ void RoxalCompiler::enterLocalScope()
     // Track lexical block ancestry for 'jump'/'label' enclosing-scope validation.
     auto fs = asFuncScope(funcScope());
     fs->blockPath.push_back(fs->nextBlockId++);
+    // constBindings[d] is the const map for scopeDepth d; LexicalRank relies on it.
+    assert(fs->constBindings.size() == size_t(fs->scopeDepth) + 1);
     #ifdef DEBUG_TRACE_SCOPES
     std::cout << "enterLocalScope() depth:" << asFuncScope(funcScope())->scopeDepth << std::endl;
     outputScopes();
@@ -6407,6 +6417,7 @@ void RoxalCompiler::exitLocalScope()
     auto& constBindings = asFuncScope(funcScope())->constBindings;
     if (!constBindings.empty())
         constBindings.pop_back();
+    assert(constBindings.size() == size_t(asFuncScope(funcScope())->scopeDepth) + 1);
 
     auto& blockPath = asFuncScope(funcScope())->blockPath;
     if (!blockPath.empty())
@@ -6791,7 +6802,7 @@ int16_t RoxalCompiler::resolveLocal(Scope scopeState, const ustring& name)
     std::cout << "resolveLocal(scope=" << toUTF8StdString((*scopeState)->name) << ", " << toUTF8StdString(name) << ")";
     #endif
     //std::cout << (&(*scopeState) - &(*states.begin()))<< " resolveLocal(" << toUTF8StdString(name) << ")" << std::endl;
-    auto locals { asFuncScope(scopeState)->locals };
+    const auto& locals { asFuncScope(scopeState)->locals };
     if (!locals.empty())
         for(int32_t i=locals.size()-1; i>=0; i--) {
             #ifdef DEBUG_BUILD
@@ -6917,7 +6928,7 @@ bool RoxalCompiler::moduleConstExists(const ustring& name) const
     return false;
 }
 
-const RoxalCompiler::FunctionScope::ConstBinding* RoxalCompiler::lookupConstBinding(const ustring& name) const
+std::optional<RoxalCompiler::ConstLookup> RoxalCompiler::lookupConstBinding(const ustring& name) const
 {
     for (auto it = lexicalScopes.crbegin(); it != lexicalScopes.crend(); ++it) {
         if (!(*it)->isFuncOrModule())
@@ -6927,11 +6938,146 @@ const RoxalCompiler::FunctionScope::ConstBinding* RoxalCompiler::lookupConstBind
             continue;
         for (auto mapIt = func->constBindings.rbegin(); mapIt != func->constBindings.rend(); ++mapIt) {
             auto found = mapIt->find(name);
-            if (found != mapIt->end())
-                return &found->second;
+            if (found != mapIt->end()) {
+                // constBindings is index-aligned with scopeDepth (see enterLocalScope)
+                LexicalRank rank { int(lexicalScopes.size() - 1 - (it - lexicalScopes.crbegin())),
+                                   int(func->constBindings.rend() - mapIt - 1) };
+                return ConstLookup{ found->second, rank };
+            }
         }
     }
-    return nullptr;
+    return std::nullopt;
+}
+
+std::optional<RoxalCompiler::ConstLookup> RoxalCompiler::visibleConstBinding(const ustring& name,
+                                                                              LexicalRank shadowRank) const
+{
+    auto found = lookupConstBinding(name);
+    if (!found || !found->rank.innerThan(shadowRank))
+        return std::nullopt;   // absent, or shadowed by an inner binding
+    return found;
+}
+
+std::optional<RoxalCompiler::ConstLookup> RoxalCompiler::visibleConstBinding(const ustring& name)
+{
+    return visibleConstBinding(name, findBinding(name).rank);
+}
+
+
+RoxalCompiler::Candidate RoxalCompiler::findBinding(const ustring& name)
+{
+    Candidate c;
+    auto fs = funcScope();
+    auto fsPtr = asFuncScope(fs);
+
+    // 1. local or parameter in the current function
+    if (int16_t i = resolveLocal(fs, name); i != -1) {
+        c.kind = Candidate::Kind::Local;
+        c.scope = fs;
+        c.index = i;
+        c.rank = { scopeIndexOf(fs), fsPtr->locals[i].depth };
+        return c;
+    }
+
+    // 2. local in an enclosing function — the traversal resolveUpvalue performs,
+    //    without the capture (that happens at emission time).
+    for (Scope cur = fs; hasEnclosingFuncScope(cur); ) {
+        cur = enclosingFuncScope(cur);
+        if (int16_t i = resolveLocal(cur, name); i != -1) {
+            c.kind = Candidate::Kind::Upvalue;
+            c.scope = cur;
+            c.index = i;
+            c.rank = { scopeIndexOf(cur), asFuncScope(cur)->locals[i].depth };
+            return c;
+        }
+    }
+
+    // 3. with-context: naked enum label, or object/actor property or method (unranked)
+    if (!withContextStack.empty()) {
+        const auto& ctx = withContextStack.back();
+        if (ctx.kind == ast::WithStatement::EnumType) {
+            if (ctx.type->enumer.has_value())
+                for (const auto& [label, value] : ctx.type->enumer.value().values)
+                    if (label == name) { c.kind = Candidate::Kind::WithEnumLabel; return c; }
+        }
+        else if (ctx.kind == ast::WithStatement::ObjectType || ctx.kind == ast::WithStatement::ActorType) {
+            if (ctx.type->obj.has_value()) {
+                const auto& objType = ctx.type->obj.value();
+                for (const auto& prop : objType.properties)
+                    if (prop.name == name) { c.kind = Candidate::Kind::WithProperty; return c; }
+                for (const auto& mi : objType.methods)
+                    if (mi.name == name) { c.kind = Candidate::Kind::WithMethod; return c; }
+            }
+        }
+    }
+
+    bool inTypeBody = inTypeScope() && fsPtr->functionType == FunctionType::Module;
+
+    // 4. an in-flight enclosing type's own name (unranked)
+    if (inTypeBody) {
+        for (auto si = lexicalScopes.rbegin(); si != lexicalScopes.rend(); ++si) {
+            if ((*si)->scopeType != LexicalScope::ScopeType::Type) continue;
+            auto ts = dynamic_ptr_cast<TypeScope>(*si);
+            if (ts->name == name && ts->inFlightStackSlot >= 0) {
+                c.kind = Candidate::Kind::InFlightType;
+                c.scope = (si + 1).base();
+                c.index = ts->inFlightStackSlot;
+                return c;
+            }
+        }
+    }
+
+    // 5. const member of an enclosing type, from a type body
+    if (inTypeBody) {
+        for (auto si = lexicalScopes.rbegin(); si != lexicalScopes.rend(); ++si) {
+            if ((*si)->scopeType != LexicalScope::ScopeType::Type) continue;
+            auto ts = dynamic_ptr_cast<TypeScope>(*si);
+            auto itMem = ts->propertyNames.find(name);
+            if (itMem != ts->propertyNames.end() && itMem->second.isConst) {
+                c.kind = Candidate::Kind::EnclosingTypeConstMember;
+                c.scope = (si + 1).base();
+                c.rank = { scopeIndexOf(c.scope), 0 };
+                return c;
+            }
+        }
+    }
+
+    bool inMethodOrInit = fsPtr->functionType == FunctionType::Method ||
+                          fsPtr->functionType == FunctionType::Initializer;
+
+    // 6. implicit `this.` member in a method / initializer
+    if (inMethodOrInit && inTypeScope()) {
+        auto ts = typeScope();
+        if (resolveLocal(fs, ustring("this")) != -1 &&
+            asTypeScope(ts)->propertyNames.find(name) != asTypeScope(ts)->propertyNames.end()) {
+            c.kind = Candidate::Kind::ThisMember;
+            c.scope = ts;
+            c.rank = { scopeIndexOf(ts), 0 };
+            return c;
+        }
+    }
+
+    // 7. member via a captured `this` — closure inside a method.  `this` is
+    //    capturable iff some enclosing function has it as a local (step 2's
+    //    traversal with the name "this"); the capture itself is deferred.
+    if (inTypeScope()) {
+        auto ts = typeScope();
+        if (asTypeScope(ts)->propertyNames.find(name) != asTypeScope(ts)->propertyNames.end()) {
+            for (Scope cur = fs; hasEnclosingFuncScope(cur); ) {
+                cur = enclosingFuncScope(cur);
+                if (resolveLocal(cur, ustring("this")) != -1) {
+                    c.kind = Candidate::Kind::ThisUpvalueMember;
+                    c.scope = ts;
+                    c.rank = { scopeIndexOf(ts), 0 };
+                    return c;
+                }
+            }
+        }
+    }
+
+    // 8. module variable (late-bound; unranked)
+    c.kind = Candidate::Kind::ModuleVar;
+    return c;
 }
 
 
@@ -7101,10 +7247,13 @@ Value RoxalCompiler::evaluateConstExpression(ptr<ast::Expression> expr, bool str
     }
 
     if (auto variable = dynamic_ptr_cast<ast::Variable>(expr)) {
-        auto binding = lookupConstBinding(variable->name);
-        if (!binding)
+        // Shadowing-aware: a const hidden by an inner local / param / member is
+        // not a compile-time constant here.  The throw from error() drops the
+        // caller into the runtime-const path, which resolves the name normally.
+        auto found = visibleConstBinding(variable->name);
+        if (!found)
             error("Const initializer references an identifier that is not a const.");
-        return binding->value;
+        return found->binding.value;
     }
 
     error("Const initializer must be a compile-time constant expression.");
@@ -7140,185 +7289,233 @@ bool RoxalCompiler::namedVariable(const ustring& name, bool assign, bool asSigna
     //std::cout << (&(*state()) - &(*states.begin())) << " namedVariable(" << toUTF8StdString(name) << ")" << std::endl;
     //std::cout << toUTF8StdString(funcScope()->function->name) << " namedVariable(" << toUTF8StdString(name) << ")" << std::endl;
 
-    if (auto binding = lookupConstBinding(name)) {
+    // Discovery first (side-effect free), then the const gate: a compile-time
+    // const is inlined only if no local / parameter / member declared inside its
+    // scope shadows it.  findBinding() is the single walk over the non-const
+    // branches below; the emission for whichever kind it picked follows.
+    Candidate cand = findBinding(name);
+
+    if (auto found = visibleConstBinding(name, cand.rank)) {
+        const auto& binding = found->binding;
         if (asSignal)
             error("'changes' requires a module variable binding; use a signal expression instead");
         if (assign) {
             std::string message = "Cannot assign to constant '" + toUTF8StdString(name) + "'";
-            if (binding->line.line > 0)
-                message += " (declared at line " + std::to_string(binding->line.line) + ")";
+            if (binding.line.line > 0)
+                message += " (declared at line " + std::to_string(binding.line.line) + ")";
             error(message);
         }
-        emitConstant(binding->value, toUTF8StdString(name));
+        emitConstant(binding.value, toUTF8StdString(name));
         return true;
     }
 
     OpCode getOp, setOp;
-    bool found = false;
-
     uint16_t arg;
-    int16_t localArg = resolveLocal(funcScope(),name);
-    if (localArg != -1) { // found
+
+    switch (cand.kind) {
+
+    case Candidate::Kind::Local: {
         if (asSignal)
             error("'changes' requires a module variable binding; use a signal expression instead");
-        if (assign && asFuncScope(funcScope())->locals[localArg].isConst)
+        const auto& local = asFuncScope(funcScope())->locals[cand.index];
+        if (assign && local.isConst)
             error("Cannot assign to constant '" + toUTF8StdString(name) + "'");
-        if (assign && asFuncScope(funcScope())->locals[localArg].isParam)
+        if (assign && local.isParam)
             error("Cannot assign to parameter '" + toUTF8StdString(name) + "'. Parameters are immutable bindings; use 'var " + toUTF8StdString(name) + " = ...' to create a mutable copy.");
-        found = true;
-        arg = localArg;
+        arg = cand.index;
         getOp = OpCode::GetLocal;
         setOp = OpCode::SetLocal;
+        break;
     }
-    // else if ((funcScope()->functionType == FunctionType::Method ) && ((arg = resolveLocal(funcScope(),"this") != -1))) {
-    //     // if we have a property name, allow access without 'this.' prefix
-    //     if (!typeScopes.empty()) {
-    //         // FIXME: statically check the property exists.. (otherwise we're blocking all outer scope local access..)
-    //         //std::cout << funcScope() << std::endl;
-    //         arg = identifierConstant(name);
-    //         namedVariable("this", false);
-    //         //emitBytes(OpCode::GetProp, uint8_t(identConstant));
-    //         getOp = OpCode::GetProp;
-    //         setOp = OpCode::SetProp;
-    //         found = true;
-    //     }
-    // }
 
-    int16_t upValueArg;
-    if (!found && ((upValueArg = resolveUpvalue(funcScope(),name)) != -1)) {
+    case Candidate::Kind::Upvalue: {
         if (asSignal)
             error("'changes' requires a module variable binding; use a signal expression instead");
-        found = true;
+        // Capture now — findBinding() located the owning local without capturing.
+        int16_t upValueArg = resolveUpvalue(funcScope(), name);
+        assert(upValueArg != -1);
         arg = upValueArg;
         getOp = OpCode::GetUpvalue;
         setOp = OpCode::SetUpvalue;
+        break;
     }
 
-    // Check with context stack for naked enum labels or object/actor members
-    if (!found && !withContextStack.empty()) {
-        const auto& ctx = withContextStack.back();
+    case Candidate::Kind::WithEnumLabel: {
+        // naked enum label of the innermost `with`
+        if (assign)
+            error("Cannot assign to enum label '" + toUTF8StdString(name) + "'");
+        if (asSignal)
+            error("Enum labels cannot be used as signals");
 
-        if (ctx.kind == ast::WithStatement::EnumType) {
-            // Check if name matches an enum label
-            if (ctx.type->enumer.has_value()) {
-                const auto& enumType = ctx.type->enumer.value();
-                for (const auto& [label, value] : enumType.values) {
-                    if (label == name) {
-                        if (assign)
-                            error("Cannot assign to enum label '" + toUTF8StdString(name) + "'");
-                        if (asSignal)
-                            error("Enum labels cannot be used as signals");
-
-                        // Load the enum type from the with context
-                        emitOpArgsBytes(OpCode::GetLocal, ctx.stackSlot);
-                        // Create the enum value (type + label)
-                        uint16_t labelConstant = identifierConstant(name);
-                        emitOpArgsBytes(OpCode::GetProp, labelConstant, toUTF8StdString(name));
-                        return true;
-                    }
-                }
-            }
-        }
-        else if (ctx.kind == ast::WithStatement::ObjectType || ctx.kind == ast::WithStatement::ActorType) {
-            // Check if name matches an object/actor property or method
-            if (ctx.type->obj.has_value()) {
-                const auto& objType = ctx.type->obj.value();
-
-                // Check properties
-                for (const auto& prop : objType.properties) {
-                    if (prop.name == name) {
-                        if (asSignal)
-                            error("'changes' requires a module variable binding; use a signal expression instead");
-
-                        // Load the instance from the with context
-                        // Then access the property
-                        uint16_t propConstant = identifierConstant(name);
-                        if (!assign) {
-                            emitOpArgsBytes(OpCode::GetLocal, ctx.stackSlot);
-                            emitOpArgsBytes(OpCode::GetProp, propConstant, toUTF8StdString(name));
-                        } else {
-                            // For assignment: value is already on stack, load instance, swap, then set
-                            emitOpArgsBytes(OpCode::GetLocal, ctx.stackSlot);
-                            emitByte(OpCode::Swap);
-                            emitOpArgsBytes(OpCode::SetProp, propConstant, toUTF8StdString(name));
-                        }
-                        return true;
-                    }
-                }
-
-                // Check methods
-                for (const auto& mi : objType.methods) {
-                    if (mi.name == name) {
-                        if (assign)
-                            error("Cannot assign to method '" + toUTF8StdString(name) + "'");
-                        if (asSignal)
-                            error("Methods cannot be used as signals");
-
-                        // Load the instance and access the method
-                        uint16_t methodConstant = identifierConstant(name);
-                        emitOpArgsBytes(OpCode::GetLocal, ctx.stackSlot);
-                        emitOpArgsBytes(OpCode::GetProp, methodConstant, toUTF8StdString(name));
-                        return true;
-                    }
-                }
-            }
-        }
+        // Load the enum type from the with context
+        emitOpArgsBytes(OpCode::GetLocal, withContextStack.back().stackSlot);
+        // Create the enum value (type + label)
+        uint16_t labelConstant = identifierConstant(name);
+        emitOpArgsBytes(OpCode::GetProp, labelConstant, toUTF8StdString(name));
+        return true;
     }
 
-    // If `name` matches an in-flight enclosing type's own name, load it directly
-    // from its anchor slot. Without this, references like `Middle.Inner` from
-    // inside Middle's body would fall through to the const-member walker below,
-    // find Middle in Outer's typescope, and emit `GetLocal Outer + GetProp Middle`
-    // — which fails at runtime because Outer's NESTED_TYPE attachment for Middle
-    // hasn't run yet.
-    if (!found && inTypeScope()
-        && asFuncScope(funcScope())->functionType == FunctionType::Module) {
-        for (auto si = lexicalScopes.rbegin(); si != lexicalScopes.rend(); ++si) {
-            if ((*si)->scopeType != LexicalScope::ScopeType::Type) continue;
-            auto ts = dynamic_ptr_cast<TypeScope>(*si);
-            if (ts->name == name && ts->inFlightStackSlot >= 0) {
-                if (assign)
-                    error("Cannot assign to type '" + toUTF8StdString(name) + "'");
-                emitOpArgsBytes(OpCode::GetLocal,
-                                static_cast<uint16_t>(ts->inFlightStackSlot),
-                                "in-flight " + toUTF8StdString(name));
-                return true;
-            }
+    case Candidate::Kind::WithProperty: {
+        // object/actor property of the innermost `with`
+        if (asSignal)
+            error("'changes' requires a module variable binding; use a signal expression instead");
+
+        // Load the instance from the with context, then access the property
+        uint16_t slot = withContextStack.back().stackSlot;
+        uint16_t propConstant = identifierConstant(name);
+        if (!assign) {
+            emitOpArgsBytes(OpCode::GetLocal, slot);
+            emitOpArgsBytes(OpCode::GetProp, propConstant, toUTF8StdString(name));
+        } else {
+            // For assignment: value is already on stack, load instance, swap, then set
+            emitOpArgsBytes(OpCode::GetLocal, slot);
+            emitByte(OpCode::Swap);
+            emitOpArgsBytes(OpCode::SetProp, propConstant, toUTF8StdString(name));
         }
+        return true;
     }
 
-    // If in a type body (not a method), check if the name is a const member of any
-    // enclosing type (e.g., nested type or const value). Resolve as EnclosingType.name.
-    // Walk up through nested TypeScopes to find the member.
-    if (!found && inTypeScope()
-        && asFuncScope(funcScope())->functionType == FunctionType::Module) {
-        for (auto si = lexicalScopes.rbegin(); si != lexicalScopes.rend(); ++si) {
-            if ((*si)->scopeType != LexicalScope::ScopeType::Type) continue;
-            auto ts = dynamic_ptr_cast<TypeScope>(*si);
-            auto itMem = ts->propertyNames.find(name);
-            if (itMem != ts->propertyNames.end() && itMem->second.isConst) {
-                uint16_t nameConst = identifierConstant(name);
-                if (ts->inFlightStackSlot >= 0) {
-                    // Load the in-flight enclosing type from its anchor slot.
-                    // Going through namedVariable(ts->name) would emit
-                    // `GetModuleVar grandparent + GetProp ts->name`, which fails
-                    // at runtime when ts is itself a nested type still under
-                    // construction (its NESTED_TYPE attachment to its parent
-                    // hasn't run yet).
-                    emitOpArgsBytes(OpCode::GetLocal,
-                                    static_cast<uint16_t>(ts->inFlightStackSlot),
-                                    "in-flight " + toUTF8StdString(ts->name));
-                } else {
-                    namedVariable(ts->name, false); // push enclosing type
-                }
-                emitOpArgsBytes(OpCode::GetProp, nameConst);
-                return true;
-            }
-        }
+    case Candidate::Kind::WithMethod: {
+        // object/actor method of the innermost `with`
+        if (assign)
+            error("Cannot assign to method '" + toUTF8StdString(name) + "'");
+        if (asSignal)
+            error("Methods cannot be used as signals");
+
+        // Load the instance and access the method
+        uint16_t methodConstant = identifierConstant(name);
+        emitOpArgsBytes(OpCode::GetLocal, withContextStack.back().stackSlot);
+        emitOpArgsBytes(OpCode::GetProp, methodConstant, toUTF8StdString(name));
+        return true;
     }
 
-    if (!found) { // local or upvalue not found
-        // try module scope first
+    case Candidate::Kind::InFlightType: {
+        // `name` is an in-flight enclosing type's own name: load it directly from
+        // its anchor slot. Without this, references like `Middle.Inner` from
+        // inside Middle's body would fall through to the const-member walker,
+        // find Middle in Outer's typescope, and emit `GetLocal Outer + GetProp Middle`
+        // — which fails at runtime because Outer's NESTED_TYPE attachment for Middle
+        // hasn't run yet.
+        if (assign)
+            error("Cannot assign to type '" + toUTF8StdString(name) + "'");
+        emitOpArgsBytes(OpCode::GetLocal,
+                        static_cast<uint16_t>(cand.index),
+                        "in-flight " + toUTF8StdString(name));
+        return true;
+    }
+
+    case Candidate::Kind::EnclosingTypeConstMember: {
+        // In a type body (not a method): `name` is a const member of an enclosing
+        // type (e.g., nested type or const value). Resolve as EnclosingType.name.
+        auto ts = asTypeScope(cand.scope);
+        uint16_t nameConst = identifierConstant(name);
+        if (ts->inFlightStackSlot >= 0) {
+            // Load the in-flight enclosing type from its anchor slot.
+            // Going through namedVariable(ts->name) would emit
+            // `GetModuleVar grandparent + GetProp ts->name`, which fails
+            // at runtime when ts is itself a nested type still under
+            // construction (its NESTED_TYPE attachment to its parent
+            // hasn't run yet).
+            emitOpArgsBytes(OpCode::GetLocal,
+                            static_cast<uint16_t>(ts->inFlightStackSlot),
+                            "in-flight " + toUTF8StdString(ts->name));
+        } else {
+            namedVariable(ts->name, false); // push enclosing type
+        }
+        emitOpArgsBytes(OpCode::GetProp, nameConst);
+        return true;
+    }
+
+    case Candidate::Kind::ThisMember: {
+        // implicit property access inside a method / initializer: `name` → this.name
+        auto ts = asTypeScope(cand.scope);
+        arg = identifierConstant(name);
+        const auto& info = ts->propertyNames.find(name)->second;
+        if (info.access == Access::Private && info.owner != ts->name)
+            error("Cannot access private member '"+toUTF8StdString(name)+"'");
+        if (assign && info.isConst)
+            error("Cannot assign to const property '"+toUTF8StdString(name)+"'");
+        // treat as property access
+        // Check if this is a property accessor (has getter/setter methods)
+        ustring getterName = ustring("__get_") + name;
+        ustring setterName = ustring("__set_") + name;
+        bool hasGetter = ts->propertyNames.find(getterName) != ts->propertyNames.end();
+        bool hasSetter = ts->propertyNames.find(setterName) != ts->propertyNames.end();
+
+        if (!assign && hasGetter && !asSignal) {
+            // Use getter method instead of GetProp
+            namedVariable(ustring("this"), false);
+            uint16_t getterConstant = identifierConstant(getterName);
+            emitOpArgsBytes(OpCode::Invoke, getterConstant);
+            CallSpec callSpec{0}; // 0 args
+            auto callSpecBytes = callSpec.toBytes();
+            for (uint8_t byte : callSpecBytes) {
+                emitByte(byte);
+            }
+        } else if (!assign && (hasGetter || hasSetter) && asSignal) {
+            // For 'when X changes:' on a property with accessors,
+            // access the backing field's signal instead of invoking the getter
+            ustring backingName = ustring("_") + name;
+            uint16_t backingArg = identifierConstant(backingName);
+            namedVariable(ustring("this"), false);
+            emitOpArgsBytes(OpCode::GetPropSignal, backingArg, toUTF8StdString(backingName));
+        } else if (assign && hasSetter) {
+            // Use setter method instead of SetProp
+            // Stack has: [value]
+            namedVariable(ustring("this"), false); // Stack: [value, this]
+            emitByte(OpCode::Swap); // Stack: [this, value]
+            uint16_t setterConstant = identifierConstant(setterName);
+            emitOpArgsBytes(OpCode::Invoke, setterConstant);
+            CallSpec callSpec{1}; // 1 arg
+            auto callSpecBytes = callSpec.toBytes();
+            for (uint8_t byte : callSpecBytes) {
+                emitByte(byte);
+            }
+        } else {
+            // Regular property access (no getter/setter)
+            if (!assign) {
+                namedVariable(ustring("this"), false);
+                if (asSignal)
+                    emitOpArgsBytes(OpCode::GetPropSignal, arg, toUTF8StdString(name));
+                else
+                    emitOpArgsBytes(OpCode::GetProp, arg);
+            } else {
+                namedVariable(ustring("this"), false);
+                emitByte(OpCode::Swap);
+                emitOpArgsBytes(OpCode::SetProp, arg);
+            }
+        }
+        return true;
+    }
+
+    case Candidate::Kind::ThisUpvalueMember: {
+        // Closure inside a method (e.g. a when handler): `name` is a property of
+        // the enclosing type and `this` is reachable as an upvalue.  Capture
+        // `this` now — findBinding() established it is capturable without doing so.
+        auto ts = asTypeScope(cand.scope);
+        int16_t thisUpvalue = resolveUpvalue(funcScope(), ustring("this"));
+        assert(thisUpvalue != -1);
+        const auto& info = ts->propertyNames.find(name)->second;
+        if (info.access == Access::Private && info.owner != ts->name)
+            error("Cannot access private member '"+toUTF8StdString(name)+"'");
+        if (assign && info.isConst)
+            error("Cannot assign to const property '"+toUTF8StdString(name)+"'");
+
+        // Access property via 'this' upvalue
+        uint16_t propConstant = identifierConstant(name);
+        if (!assign) {
+            emitOpArgsBytes(OpCode::GetUpvalue, thisUpvalue, "this");
+            emitOpArgsBytes(OpCode::GetProp, propConstant, toUTF8StdString(name));
+        } else {
+            emitOpArgsBytes(OpCode::GetUpvalue, thisUpvalue, "this");
+            emitByte(OpCode::Swap);
+            emitOpArgsBytes(OpCode::SetProp, propConstant, toUTF8StdString(name));
+        }
+        return true;
+    }
+
+    case Candidate::Kind::ModuleVar: {
+        // module scope (late-bound): if the variable isn't found at runtime, the VM raises an error.
         arg = identifierConstant(name);
         getOp = OpCode::GetModuleVar;
         auto module = asModuleScope(moduleScope());
@@ -7343,112 +7540,20 @@ bool RoxalCompiler::namedVariable(const ustring& name, bool assign, bool asSigna
         if (assign && inModuleFunction && !exists)
             module->moduleVarLines[name] = currentNode->interval.first;
 
-        // if module variable isn't found at runtime, the VM will raise an error.
-        // to allow implicit property access, check for 'this' method context as fallback
-        if (asFuncScope(funcScope())->functionType == FunctionType::Method ||
-            asFuncScope(funcScope())->functionType == FunctionType::Initializer) {
-            int16_t thisLocal = resolveLocal(funcScope(), ustring("this"));
-            auto itMem = asTypeScope(typeScope())->propertyNames.find(name);
-            if (thisLocal != -1 && itMem != asTypeScope(typeScope())->propertyNames.end()) {
-                const auto& info = itMem->second;
-                if (info.access == Access::Private && info.owner != asTypeScope(typeScope())->name)
-                    error("Cannot access private member '"+toUTF8StdString(name)+"'");
-                if (assign && info.isConst)
-                    error("Cannot assign to const property '"+toUTF8StdString(name)+"'");
-                // treat as property access
-                // Check if this is a property accessor (has getter/setter methods)
-                ustring getterName = ustring("__get_") + name;
-                ustring setterName = ustring("__set_") + name;
-                auto getterIt = asTypeScope(typeScope())->propertyNames.find(getterName);
-                auto setterIt = asTypeScope(typeScope())->propertyNames.find(setterName);
-                bool hasGetter = getterIt != asTypeScope(typeScope())->propertyNames.end();
-                bool hasSetter = setterIt != asTypeScope(typeScope())->propertyNames.end();
-
-                if (!assign && hasGetter && !asSignal) {
-                    // Use getter method instead of GetProp
-                    namedVariable(ustring("this"), false);
-                    uint16_t getterConstant = identifierConstant(getterName);
-                    emitOpArgsBytes(OpCode::Invoke, getterConstant);
-                    CallSpec callSpec{0}; // 0 args
-                    auto callSpecBytes = callSpec.toBytes();
-                    for (uint8_t byte : callSpecBytes) {
-                        emitByte(byte);
-                    }
-                } else if (!assign && (hasGetter || hasSetter) && asSignal) {
-                    // For 'when X changes:' on a property with accessors,
-                    // access the backing field's signal instead of invoking the getter
-                    ustring backingName = ustring("_") + name;
-                    uint16_t backingArg = identifierConstant(backingName);
-                    namedVariable(ustring("this"), false);
-                    emitOpArgsBytes(OpCode::GetPropSignal, backingArg, toUTF8StdString(backingName));
-                } else if (assign && hasSetter) {
-                    // Use setter method instead of SetProp
-                    // Stack has: [value]
-                    namedVariable(ustring("this"), false); // Stack: [value, this]
-                    emitByte(OpCode::Swap); // Stack: [this, value]
-                    uint16_t setterConstant = identifierConstant(setterName);
-                    emitOpArgsBytes(OpCode::Invoke, setterConstant);
-                    CallSpec callSpec{1}; // 1 arg
-                    auto callSpecBytes = callSpec.toBytes();
-                    for (uint8_t byte : callSpecBytes) {
-                        emitByte(byte);
-                    }
-                } else {
-                    // Regular property access (no getter/setter)
-                    if (!assign) {
-                        namedVariable(ustring("this"), false);
-                        if (asSignal)
-                            emitOpArgsBytes(OpCode::GetPropSignal, arg, toUTF8StdString(name));
-                        else
-                            emitOpArgsBytes(OpCode::GetProp, arg);
-                    } else {
-                        namedVariable(ustring("this"), false);
-                        emitByte(OpCode::Swap);
-                        emitOpArgsBytes(OpCode::SetProp, arg);
-                    }
-                }
-                return true;
-            }
-        }
-
         // Actor methods may not access mutable module state, but an actor's own
         // member has lexical precedence over an unrelated module variable with
-        // the same name. Apply the actor restriction only after direct member
-        // resolution has failed and the name will actually fall back to the
-        // module binding.
+        // the same name (findBinding() returns ThisMember / ThisUpvalueMember for
+        // those, so this guard only sees names that genuinely fall back to the
+        // module binding).
         if (inActorMethod && exists && !isModuleConst) {
             error("Actor methods cannot access module variable '"+toUTF8StdString(name)+"'; use a module constant instead.");
         }
+        break;
+    }
 
-        // For closures inside methods (e.g. when handlers), check if 'this' is available as an upvalue
-        // and the name is a property in the enclosing type scope
-        // IMPORTANT: Check if name is a property FIRST, because resolveUpvalue has side effects
-        // (it creates the upvalue if found). We only want to capture 'this' if actually needed.
-        if (inTypeScope()) {
-            auto itMem = asTypeScope(typeScope())->propertyNames.find(name);
-            int16_t thisUpvalue = (itMem != asTypeScope(typeScope())->propertyNames.end())
-                ? resolveUpvalue(funcScope(), ustring("this"))
-                : -1;
-            if (thisUpvalue != -1 && itMem != asTypeScope(typeScope())->propertyNames.end()) {
-                const auto& info = itMem->second;
-                if (info.access == Access::Private && info.owner != asTypeScope(typeScope())->name)
-                    error("Cannot access private member '"+toUTF8StdString(name)+"'");
-                if (assign && info.isConst)
-                    error("Cannot assign to const property '"+toUTF8StdString(name)+"'");
-
-                // Access property via 'this' upvalue
-                uint16_t propConstant = identifierConstant(name);
-                if (!assign) {
-                    emitOpArgsBytes(OpCode::GetUpvalue, thisUpvalue, "this");
-                    emitOpArgsBytes(OpCode::GetProp, propConstant, toUTF8StdString(name));
-                } else {
-                    emitOpArgsBytes(OpCode::GetUpvalue, thisUpvalue, "this");
-                    emitByte(OpCode::Swap);
-                    emitOpArgsBytes(OpCode::SetProp, propConstant, toUTF8StdString(name));
-                }
-                return true;
-            }
-        }
+    case Candidate::Kind::None:
+        assert(false && "findBinding() returned no candidate");
+        return false;
     }
 
     if (!assign) {
@@ -7465,7 +7570,6 @@ bool RoxalCompiler::namedVariable(const ustring& name, bool assign, bool asSigna
 
     return true;
 }
-
 
 void RoxalCompiler::namedModuleVariable(const ustring& name, bool assign)
 {

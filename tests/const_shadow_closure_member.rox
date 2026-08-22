@@ -1,0 +1,13 @@
+// A member read from a closure inside a method (via captured 'this') must beat
+// a module-level const of the same name.
+const n = 7
+
+type T object:
+  var n :int = 0
+  func go():
+    this.n = 1
+    func inner():
+      print(n)
+    inner()
+
+T().go()

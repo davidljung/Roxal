@@ -1,0 +1,9 @@
+// A property initializer in a type body that names a const member of the same
+// type must resolve the member, not a module-level const of the same name.
+const n = 7
+
+type Outer object:
+  const n :int = 1
+  var copied :int = n
+
+print(Outer().copied)

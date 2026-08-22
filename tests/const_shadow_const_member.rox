@@ -1,0 +1,10 @@
+// A method reading a const member of its own type must get the member, not a
+// module-level const of the same name.
+const n = 7
+
+type Outer object:
+  const n :int = 1
+  func get() -> int:
+    return n
+
+print(Outer().get())

@@ -1,0 +1,11 @@
+// A block-level const must shadow an outer local of the same name, and the
+// outer local must be intact after the block.
+func f():
+  var n = 1
+  if true:
+    const n = 2
+    print(n)
+  n = n + 1
+  print(n)
+
+f()

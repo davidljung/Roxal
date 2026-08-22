@@ -1,0 +1,8 @@
+// Assigning to a parameter that shadows a module-level const must report the
+// parameter diagnostic, not the const one.
+const n = 7
+
+func f(n :int):
+  n = 5
+
+f(3)

@@ -257,6 +257,37 @@ protected:
     typedef LexicalScopes::iterator Scope;
     LexicalScopes lexicalScopes;
 
+    // Position of a binding in the lexical scope stack.  lexicalScopes is a
+    // stack, so a larger scopeIndex is strictly more inner; within one function
+    // scope a larger blockDepth is more inner.  Used to decide whether a
+    // compile-time const is shadowed by a local / parameter / member declared
+    // inside its scope.
+    struct LexicalRank {
+        int scopeIndex { -1 };   // index into lexicalScopes; -1 = unranked
+        int blockDepth { -1 };
+        bool ranked() const { return scopeIndex >= 0; }
+        bool innerThan(const LexicalRank& o) const {
+            if (!ranked())   return false;
+            if (!o.ranked()) return true;
+            return scopeIndex != o.scopeIndex ? scopeIndex > o.scopeIndex
+                                              : blockDepth > o.blockDepth;
+        }
+    };
+
+    // What a bare identifier resolves to, ignoring compile-time consts.
+    // Produced by findBinding() (side-effect free); namedVariable() decides
+    // const-vs-candidate by rank and then emits for the chosen kind.
+    struct Candidate {
+        enum class Kind { None, Local, Upvalue,
+                          WithEnumLabel, WithProperty, WithMethod,   // innermost `with` context
+                          InFlightType, EnclosingTypeConstMember, ThisMember, ThisUpvalueMember,
+                          ModuleVar };
+        Kind kind { Kind::None };
+        LexicalRank rank;        // unranked for With* / InFlightType / ModuleVar
+        Scope scope;             // Local/Upvalue: owning FunctionScope; member kinds: the TypeScope
+        int16_t index { -1 };    // Local: slot in funcScope(); Upvalue: slot in `scope`; InFlightType: anchor slot
+    };
+
     // Compiler roots: the in-progress compilation products
     // (per-scope ObjFunctions incl. their chunk constant tables, const
     // bindings, module types, imported modules) are reachable only through
@@ -632,6 +663,11 @@ protected:
     int16_t resolveLocal(Scope scopeState, const ustring& name);
     int addUpvalue(Scope scopeState, uint8_t index, bool isLocal);
     int16_t resolveUpvalue(Scope scopeState, const ustring& name);
+    // Side-effect-free discovery of what `name` resolves to, ignoring consts.
+    // Walks the same branches as namedVariable(), in the same order, but does
+    // not emit and does not capture upvalues.
+    Candidate findBinding(const ustring& name);
+    int scopeIndexOf(Scope s) { return int(s - lexicalScopes.begin()); }
     void declareVariable(const ustring& name, std::optional<VarTypeSpec> type = std::nullopt);
     void declareConstant(const ustring& name, const Value& value, std::optional<VarTypeSpec> type = std::nullopt);
     void defineVariable(uint16_t moduleVar = 0, bool isConst = false); // moduleVar unused if defining a local
@@ -669,7 +705,24 @@ protected:
 
     std::optional<VarTypeSpec> localVarType(const ustring& name);
     std::optional<VarTypeSpec> moduleVarType(const ustring& name);
-    const FunctionScope::ConstBinding* lookupConstBinding(const ustring& name) const;
+    // Result of a compile-time const lookup: a copy of the binding (Value +
+    // declaration line — the map in FunctionScope::constBindings stays the
+    // owner) plus where in the scope stack it was found.
+    struct ConstLookup {
+        FunctionScope::ConstBinding binding;
+        LexicalRank rank;
+    };
+    // Raw const lookup: innermost compile-time const binding named `name`, with
+    // no regard to whether an inner local / member shadows it.  Most callers
+    // want visibleConstBinding() instead; the remaining raw call sites are
+    // commented as intentionally raw.
+    std::optional<ConstLookup> lookupConstBinding(const ustring& name) const;
+    // Shadowing-aware const lookup: the const binding for `name` unless a
+    // non-const binding at `shadowRank` is more inner.  The one-argument form
+    // runs findBinding() itself; namedVariable() passes the rank of the
+    // candidate it has already discovered so discovery runs once.
+    std::optional<ConstLookup> visibleConstBinding(const ustring& name, LexicalRank shadowRank) const;
+    std::optional<ConstLookup> visibleConstBinding(const ustring& name);
     bool constExistsInCurrentScope(const ustring& name) const;
     bool moduleConstExists(const ustring& name) const;
     Value evaluateConstExpression(ptr<ast::Expression> expr, bool strictContext);

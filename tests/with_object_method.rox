@@ -1,0 +1,15 @@
+// A bare method name inside `with obj:` resolves to obj.method
+type Counter object:
+  var n :int = 0
+  func bump():
+    n = n + 1
+  func get() -> int:
+    return n
+
+var c = Counter()
+with c:
+  bump()
+  bump()
+  print(get())
+
+print(c.n)

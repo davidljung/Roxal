@@ -1,0 +1,9 @@
+// A var initializer that names the variable being declared reads the outer
+// binding (here a module const): the new local is not yet initialized.
+const n = 7
+
+func f():
+  var n = n + 1
+  print(n)
+
+f()

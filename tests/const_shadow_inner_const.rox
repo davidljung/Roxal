@@ -1,0 +1,12 @@
+// An intervening function-level const must beat an outer local of the same
+// name when read from a deeper nested function.
+func a():
+  var n = 1
+  func b():
+    const n = 2
+    func c():
+      print(n)
+    c()
+  b()
+
+a()
