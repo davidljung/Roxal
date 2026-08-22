@@ -1,0 +1,10 @@
+// A name declared later in the block is reserved for the whole block:
+// reading it earlier would silently mean the module variable.
+v = 99
+
+func f():
+  print(v)
+  var v = 3
+  print(v)
+
+f()

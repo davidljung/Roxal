@@ -1,0 +1,7 @@
+// A declaring destructure reserves every target name.
+func f():
+  print(b)
+  var [a, b] = [1, 2]
+  print(a + b)
+
+f()

@@ -1,0 +1,11 @@
+// The reservation reaches nested blocks: the use below binds to the module
+// variable while the declaration further down makes it a local.
+v = 99
+
+func f():
+  if true:
+    print(v)
+  var v = 1
+  print(v)
+
+f()

@@ -8,7 +8,10 @@ type Obj object:
   var val = 'prop'
 
   func test():
-    print(val)
+    # Explicit, so the bare 'val' below is unambiguous: a local may shadow a
+    # member, but the bare name must mean one thing throughout the block --
+    # see scopetest4_ambiguous_err for the form that no longer compiles.
+    print(this.val)
     var val = 'local'
     print(val)
     showGlobal()

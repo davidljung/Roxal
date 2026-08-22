@@ -1,0 +1,14 @@
+// The exemption keeps the copy-the-member idiom working in both spellings.
+type T object:
+  var n :int = 7
+  func bare() -> int:
+    var n = n
+    return n + 1
+  func explicit() -> int:
+    var n = this.n
+    return n + 2
+
+var t = T()
+print(t.bare())
+print(t.explicit())
+print(t.n)

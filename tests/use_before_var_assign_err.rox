@@ -1,0 +1,11 @@
+// Worse than the read: without the rule this assignment silently writes the
+// module variable, and the later var makes the same name mean a local.
+v = 99
+
+func f():
+  v = 1
+  var v = 3
+  print(v)
+
+f()
+print(v)

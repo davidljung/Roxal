@@ -1,0 +1,10 @@
+// Same rule when the earlier use resolves to a member: one name meaning
+// member-then-local inside one block is the same defect.
+type T object:
+  var n :int = 0
+  func go():
+    print(n)
+    var n = 5
+    print(n)
+
+T().go()

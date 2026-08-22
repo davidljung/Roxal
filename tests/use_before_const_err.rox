@@ -1,0 +1,9 @@
+// const declarations reserve their name too.
+c = 9
+
+func f():
+  print(c)
+  const c = 3
+  print(c)
+
+f()

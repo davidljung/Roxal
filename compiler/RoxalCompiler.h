@@ -366,6 +366,7 @@ protected:
                                         "this" : "" };
             locals.push_back(Local(localName,0));
             constBindings.emplace_back();
+            pendingLocals.emplace_back();
         }
 
         std::vector<Local> locals;
@@ -377,6 +378,13 @@ protected:
             ast::LinePos line;
         };
         std::vector<std::unordered_map<ustring, ConstBinding>> constBindings;
+
+        // Names a live block declares LATER on, scanned when the block is
+        // entered (visit(Suite)) and cleared per name as its declaration is
+        // reached.  A name is reserved for its whole block, so a use before
+        // the declaration is a compile error rather than silently meaning an
+        // outer binding.  Index-aligned with scopeDepth, like constBindings.
+        std::vector<std::unordered_map<ustring, ast::LinePos>> pendingLocals;
 
         void traceValues(ValueVisitor& visitor) const override {
             if (function.isObj())
@@ -485,6 +493,16 @@ protected:
     // published entries into this module's registry.  `qualifier` is the name
     // the importing source refers to the module by; `alsoUnqualified` covers
     // `import m.*` / `import m: Name`, where the type is also visible bare.
+    // Declaration line of `name` if a live block of the current function
+    // declares it later on, else nullptr (see FunctionScope::pendingLocals).
+    const ast::LinePos* pendingDeclaration(const ustring& name);
+    // Record every name a block's own statements declare, so uses earlier in
+    // that block can be rejected.  Shallow: a nested block scans its own.
+    void scanBlockDeclarations(const std::vector<std::variant<ptr<ast::Declaration>,
+                                                              ptr<ast::Statement>>>& declsOrStmts);
+    // Reached the declaration: the name is no longer pending.
+    void clearPendingDeclaration(const ustring& name);
+
     void publishTypeMembersToModule();
     void adoptImportedTypeMembers(const Value& importedModuleType,
                                   const ustring& qualifier,

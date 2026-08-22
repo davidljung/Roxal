@@ -1,0 +1,7 @@
+// With no module variable of that name this was only a runtime error;
+// it is diagnosable at compile time.
+func f():
+  print(v)
+  var v = 3
+
+f()

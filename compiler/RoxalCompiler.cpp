@@ -84,7 +84,7 @@ static unsigned long currentProcessId()
     return static_cast<unsigned long>(::getpid());
 #endif
 }
-constexpr std::uint32_t ModuleCacheVersion = 57;   // 57: modules carry compile-time type member metadata (cross-module inherited name resolution)
+constexpr std::uint32_t ModuleCacheVersion = 58;   // 58: using a name before its 'var'/'const' declaration in the same block is a compile error
 
 std::filesystem::path moduleCachePathFor(const std::filesystem::path& sourcePath) {
     if (sourcePath.empty())
@@ -3102,6 +3102,7 @@ std::any RoxalCompiler::visit(ptr<ast::Suite> ast)
     Anys results {};
 
     enterLocalScope();
+    scanBlockDeclarations(ast->declsOrStmts);
     ast->acceptChildren(*this, results);
     exitLocalScope();
     return results;
@@ -6698,8 +6699,10 @@ void RoxalCompiler::enterLocalScope()
     // Track lexical block ancestry for 'jump'/'label' enclosing-scope validation.
     auto fs = asFuncScope(funcScope());
     fs->blockPath.push_back(fs->nextBlockId++);
+    fs->pendingLocals.emplace_back();
     // constBindings[d] is the const map for scopeDepth d; LexicalRank relies on it.
     assert(fs->constBindings.size() == size_t(fs->scopeDepth) + 1);
+    assert(fs->pendingLocals.size() == size_t(fs->scopeDepth) + 1);
     #ifdef DEBUG_TRACE_SCOPES
     std::cout << "enterLocalScope() depth:" << asFuncScope(funcScope())->scopeDepth << std::endl;
     outputScopes();
@@ -6736,6 +6739,11 @@ void RoxalCompiler::exitLocalScope()
     if (!constBindings.empty())
         constBindings.pop_back();
     assert(constBindings.size() == size_t(asFuncScope(funcScope())->scopeDepth) + 1);
+
+    auto& pendingLocals = asFuncScope(funcScope())->pendingLocals;
+    if (!pendingLocals.empty())
+        pendingLocals.pop_back();
+    assert(pendingLocals.size() == size_t(asFuncScope(funcScope())->scopeDepth) + 1);
 
     auto& blockPath = asFuncScope(funcScope())->blockPath;
     if (!blockPath.empty())
@@ -7282,6 +7290,68 @@ std::optional<RoxalCompiler::ConstLookup> RoxalCompiler::visibleConstBinding(con
 }
 
 
+const ast::LinePos* RoxalCompiler::pendingDeclaration(const ustring& name)
+{
+    auto fs = asFuncScope(funcScope());
+
+    // Innermost block that has already declared this name.  A depth == -1
+    // entry is the in-flight initializer window (`var x = x`), which does not
+    // count as declared -- resolveLocal skips it too.
+    int declaredDepth = -1;
+    for (auto li = fs->locals.rbegin(); li != fs->locals.rend(); ++li)
+        if (li->name == name && li->depth != -1) { declaredDepth = li->depth; break; }
+
+    // Innermost live block outward; stops at this function (a name declared
+    // later in an ENCLOSING function is a capture-order question, not this one).
+    for (size_t depth = fs->pendingLocals.size(); depth-- > 0; ) {
+        auto found = fs->pendingLocals[depth].find(name);
+        if (found == fs->pendingLocals[depth].end())
+            continue;
+        // A declaration in this block or an inner one has already been reached,
+        // so the use binds to that one.  The pending declaration further out is
+        // a different, later variable and leaves this use unambiguous -- e.g. a
+        // `var elapsed` inside an except block, with another in the function
+        // body below it.
+        if (declaredDepth >= int(depth))
+            return nullptr;
+        return &found->second;
+    }
+    return nullptr;
+}
+
+
+void RoxalCompiler::clearPendingDeclaration(const ustring& name)
+{
+    auto fs = asFuncScope(funcScope());
+    if (!fs->pendingLocals.empty())
+        fs->pendingLocals.back().erase(name);
+}
+
+
+void RoxalCompiler::scanBlockDeclarations(
+    const std::vector<std::variant<ptr<ast::Declaration>, ptr<ast::Statement>>>& declsOrStmts)
+{
+    auto fs = asFuncScope(funcScope());
+    if (fs->pendingLocals.empty())
+        return;
+    auto& pending = fs->pendingLocals.back();
+    for (const auto& declOrStmt : declsOrStmts) {
+        if (!std::holds_alternative<ptr<Declaration>>(declOrStmt))
+            continue;
+        auto varDecl = dynamic_ptr_cast<ast::VarDecl>(std::get<ptr<Declaration>>(declOrStmt));
+        if (!varDecl)
+            continue;
+        // The destructure form declares every target (visit(VarDecl) calls
+        // declareVariable for each); the plain form declares `name`.
+        if (varDecl->targets.empty())
+            pending.emplace(varDecl->name, varDecl->interval.first);
+        else
+            for (const auto& target : varDecl->targets)
+                pending.emplace(target.name, varDecl->interval.first);
+    }
+}
+
+
 RoxalCompiler::Candidate RoxalCompiler::findBinding(const ustring& name)
 {
     Candidate c;
@@ -7401,6 +7471,8 @@ RoxalCompiler::Candidate RoxalCompiler::findBinding(const ustring& name)
 
 void RoxalCompiler::declareVariable(const ustring& name, std::optional<VarTypeSpec> type)
 {
+    clearPendingDeclaration(name);   // declaration reached: uses from here on are fine
+
     if (asFuncScope(funcScope())->scopeDepth == 0) {
         auto module = asModuleScope(moduleScope());
         auto varIt = module->moduleVarLines.find(name);
@@ -7451,6 +7523,8 @@ std::optional<RoxalCompiler::VarTypeSpec> RoxalCompiler::localVarType(const ustr
 
 void RoxalCompiler::declareConstant(const ustring& name, const Value& value, std::optional<VarTypeSpec> type)
 {
+    clearPendingDeclaration(name);
+
     auto func = asFuncScope(funcScope());
     if (func->scopeDepth == 0) {
         auto module = asModuleScope(moduleScope());
@@ -7606,6 +7680,19 @@ bool RoxalCompiler::namedVariable(const ustring& name, bool assign, bool asSigna
 {
     //std::cout << (&(*state()) - &(*states.begin())) << " namedVariable(" << toUTF8StdString(name) << ")" << std::endl;
     //std::cout << toUTF8StdString(funcScope()->function->name) << " namedVariable(" << toUTF8StdString(name) << ")" << std::endl;
+
+    // A name this block declares further down is reserved for the whole block:
+    // using it earlier would silently mean an outer binding (module variable,
+    // member or enclosing local) up to the declaration and the local after it.
+    // Checked before resolution, since what it would otherwise have resolved to
+    // is exactly what makes the two meanings hard to spot.  Reaching the
+    // declaration clears the entry, so a `var x = x` initializer -- which is
+    // compiled after declareVariable() adds the still-uninitialized local --
+    // is unaffected and keeps reading the outer binding.
+    if (const ast::LinePos* pendingAt = pendingDeclaration(name)) {
+        error("'" + toUTF8StdString(name) + "' is used before its declaration on line "
+              + std::to_string(pendingAt->line) + " in this block");
+    }
 
     // Discovery first (side-effect free), then the const gate: a compile-time
     // const is inlined only if no local / parameter / member declared inside its

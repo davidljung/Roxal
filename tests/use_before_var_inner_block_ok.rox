@@ -1,0 +1,12 @@
+// A var in a nested block reserves the name only there: the enclosing block
+// still resolves outward before and after it.
+v = 99
+
+func f():
+  print(v)
+  if true:
+    var v = 1
+    print(v)
+  print(v)
+
+f()

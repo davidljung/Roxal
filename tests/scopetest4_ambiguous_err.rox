@@ -1,0 +1,14 @@
+# The bare name may not mean the member before a local of that name is
+# declared and the local after it.  Qualify it as 'this.val' (scopetest4) or
+# rename the local.
+var val = 'global'
+
+type Obj object:
+  var val = 'prop'
+
+  func test():
+    print(val)
+    var val = 'local'
+    print(val)
+
+Obj().test()

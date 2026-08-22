@@ -1,0 +1,11 @@
+// An inner block that declares AND uses its own name is unaffected by a
+// later declaration of that name in the enclosing block: the use binds to
+// the inner one, so it is not ambiguous.
+func f():
+  if true:
+    var n = 1
+    print(n)
+  var n = 2
+  print(n)
+
+f()

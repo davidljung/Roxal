@@ -1,0 +1,10 @@
+// The declaring var is exempt in its OWN initializer: `var x = x` takes a
+// mutable copy of the outer binding, which stays legal.
+n = 9
+
+func f():
+  var n = n + 1
+  print(n)
+
+f()
+print(n)
