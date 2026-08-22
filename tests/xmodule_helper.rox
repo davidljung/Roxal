@@ -1,0 +1,6 @@
+// Imported by xmodule_extends_star / xmodule_extends_qualified.
+type Base object:
+  var a :int = 1
+  private var hidden :int = 7
+  func hello():
+    print("hello from Base")

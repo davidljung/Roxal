@@ -2203,6 +2203,17 @@ struct ObjModuleType : public ObjTypeSpec
     // property ctype annotations: type name hash -> (prop name hash -> ctype)
     std::unordered_map<int32_t, std::unordered_map<int32_t, ustring>> propertyCTypes;
 
+    // Compile-time member metadata for the types this module declares, so a
+    // module importing this one can resolve bare inherited names inside a
+    // subtype of one of them.  The compiler's own per-module registry does not
+    // outlive the import's compilation, and a cached module never recompiles,
+    // so the information has to travel with the module.  Declaration order is
+    // preserved (positional `init` and dict(obj) depend on it).  MemberInfo
+    // holds no Value, so this needs no tracing in ObjModuleType::trace().
+    // type name -> its members in declaration order
+    std::unordered_map<ustring,
+                       std::vector<std::pair<ustring, type::MemberInfo>>> typeMembers;
+
     static atomic_vector<Value> allModules;
 
     unique_ptr<Obj, UnreleasedObj> clone(roxal::ptr<CloneContext> ctx) const override;

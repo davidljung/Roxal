@@ -84,7 +84,7 @@ static unsigned long currentProcessId()
     return static_cast<unsigned long>(::getpid());
 #endif
 }
-constexpr std::uint32_t ModuleCacheVersion = 56;   // 56: forward-declared type re-linkage (Extend/Implements re-emitted after the referenced body)
+constexpr std::uint32_t ModuleCacheVersion = 57;   // 57: modules carry compile-time type member metadata (cross-module inherited name resolution)
 
 std::filesystem::path moduleCachePathFor(const std::filesystem::path& sourcePath) {
     if (sourcePath.empty())
@@ -1036,6 +1036,11 @@ std::any RoxalCompiler::visit(ptr<ast::File> ast)
         else
             throw std::runtime_error("unimplemented accept() alternative");
     }
+
+    // Hand this module's compile-time type member metadata to its ObjModuleType
+    // so importers (including ones that load us from cache) can use it.
+    publishTypeMembersToModule();
+
     emitReturn();
     return {};
 }
@@ -1053,6 +1058,52 @@ void RoxalCompiler::registerTypeMembers(const ustring& typeName,
                                         const ordered_map<ustring, TypeScope::MemberInfo>& members)
 {
     asModuleScope(moduleScope())->typePropertyRegistry[typeName] = members;
+}
+
+
+void RoxalCompiler::publishTypeMembersToModule()
+{
+    auto moduleScopePtr = asModuleScope(moduleScope());
+    if (!isModuleType(moduleScopePtr->moduleType))
+        return;
+    ObjModuleType* moduleTypeObj = asModuleType(moduleScopePtr->moduleType);
+    moduleTypeObj->typeMembers.clear();
+    for (const auto& typeEntry : moduleScopePtr->typePropertyRegistry) {
+        std::vector<std::pair<ustring, TypeScope::MemberInfo>> members;
+        members.reserve(typeEntry.second.size());
+        for (const auto& kv : typeEntry.second)     // ordered_map: declaration order
+            members.emplace_back(kv.first, kv.second);
+        moduleTypeObj->typeMembers[typeEntry.first] = std::move(members);
+    }
+}
+
+
+void RoxalCompiler::adoptImportedTypeMembers(const Value& importedModuleType,
+                                             const ustring& qualifier,
+                                             bool alsoUnqualified)
+{
+    if (!isModuleType(importedModuleType))
+        return;
+    ObjModuleType* imported = asModuleType(importedModuleType);
+    if (imported->typeMembers.empty())
+        return;
+    auto& registry = asModuleScope(moduleScope())->typePropertyRegistry;
+
+    for (const auto& typeEntry : imported->typeMembers) {
+        ordered_map<ustring, TypeScope::MemberInfo> members;
+        for (const auto& m : typeEntry.second)
+            members[m.first] = m.second;
+        // `extends othermod.Base` joins to the dotted name; `import m.*` also
+        // makes it reachable bare.  A type declared in this module keeps
+        // precedence -- only fill in names this module has not registered.
+        ustring qualified = qualifier;
+        qualified += ".";
+        qualified += typeEntry.first;
+        if (registry.find(qualified) == registry.end())
+            registry[qualified] = members;
+        if (alsoUnqualified && registry.find(typeEntry.first) == registry.end())
+            registry[typeEntry.first] = std::move(members);
+    }
 }
 
 
@@ -1656,6 +1707,13 @@ std::any RoxalCompiler::visit(ptr<ast::Import> ast)
         importingModule->registerModuleAlias(moduleName, moduleFullName);
     }
 
+
+    // Adopt the imported module's compile-time type member metadata, so a type
+    // here that extends one of theirs can resolve bare inherited names.
+    {
+        bool importsNames = !ast->symbols.empty();
+        adoptImportedTypeMembers(importedModuleType, module.name, importsNames);
+    }
 
     // if any (or all) symbols are explicitly imported into the importing module scope,
     //  create vars for those too

@@ -14,7 +14,10 @@ namespace roxal::ast {
 using roxal::type::BuiltinType;
 using roxal::type::to_string;
 
-enum class Access { Public, Private };
+// One definition, shared with the static type system (core/types.h): these
+// were parallel enums with "the same underlying ordering", which is a standing
+// invitation for them to drift.
+using Access = type::Access;
 
 
 // Method modifier flags. Stored as a bitset so multiple modifiers can be

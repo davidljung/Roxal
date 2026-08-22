@@ -335,6 +335,7 @@ tests = [
     'forward_extends_chain', 'forward_extends_init_order', 'forward_event_extends',
     'forward_iface_extends_iface_err', 'forward_nested_in_toplevel', 'forward_implements_const_inherit', 'forward_extends_actor',
     'forward_extends_bare_member', 'forward_extends_chain_bare', 'forward_nested_in_toplevel_bare',
+    'xmodule_extends_star', 'xmodule_extends_qualified', 'xmodule_extends_cached',
     'forward_import_registry_collision', 'forward_implements_interface_order',
     'forward_event_duplicate_payload',
     'actor_member_modvar_collision'
@@ -978,6 +979,22 @@ try:
             cmd = [roxal, '--ast', rel_testrox]
         elif test.startswith('check_'):
             cmd = [roxal, '--check', rel_testrox]
+        if test in ('xmodule_extends_star', 'xmodule_extends_qualified'):
+            # Exercise the source-compilation path for the import: the imported
+            # module's member metadata must reach this module either way, and
+            # this is the path a shared/compiler-level registry got right by
+            # accident (see xmodule_extends_cached for the other one).
+            cmd = [cmd[0], '--recompile', *cmd[1:]]
+        if test == 'xmodule_extends_cached':
+            # The counterpart: the helper must come from its .roc, where there
+            # is no AST to fall back on.  Prime the helper's cache, then drop
+            # only this test's own cache so the importing module recompiles.
+            helper = os.path.join(test_dir, 'xmodule_helper_cached.rox')
+            subprocess.run([roxal, '--precompile', os.path.relpath(helper, os.getcwd())],
+                           capture_output=True)
+            own_cache = os.path.join(test_dir, '.xmodule_extends_cached.roc')
+            if os.path.exists(own_cache):
+                os.remove(own_cache)
         if test == 'forward_import_registry_collision':
             # This regression is specifically in the source-compilation path:
             # compiling the imported helper recursively overwrites the outer

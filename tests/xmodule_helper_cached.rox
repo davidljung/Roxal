@@ -1,0 +1,6 @@
+// Imported by xmodule_extends_cached, which loads this from its .roc cache.
+// Kept separate so a --recompile test cannot clear the primed cache.
+type Base object:
+  var a :int = 1
+  func hello():
+    print("hello from Base")

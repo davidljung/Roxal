@@ -4544,6 +4544,46 @@ void ObjModuleType::write(std::ostream& out, roxal::ptr<SerializationContext> ct
                 out.write(ctypeUtf8.data(), ctypeLen);
         }
     }
+
+    // Compile-time type member metadata (see ObjModuleType::typeMembers): an
+    // importing module reads this to resolve bare inherited names in a subtype
+    // of one of our types, whether we were compiled or loaded from cache.
+    auto writeUString = [&out](const ustring& u) {
+        std::string utf8; u.toUTF8String(utf8);
+        uint32_t len = static_cast<uint32_t>(utf8.size());
+        out.write(reinterpret_cast<char*>(&len), 4);
+        if (len) out.write(utf8.data(), len);
+    };
+    uint32_t memberTypeCount = static_cast<uint32_t>(typeMembers.size());
+    out.write(reinterpret_cast<char*>(&memberTypeCount), 4);
+    for (const auto& typeEntry : typeMembers) {
+        writeUString(typeEntry.first);
+        uint32_t memberCount = static_cast<uint32_t>(typeEntry.second.size());
+        out.write(reinterpret_cast<char*>(&memberCount), 4);
+        for (const auto& entry : typeEntry.second) {
+            const type::MemberInfo& m = entry.second;
+            writeUString(entry.first);                       // member name
+            uint8_t access = static_cast<uint8_t>(m.access);
+            out.write(reinterpret_cast<char*>(&access), 1);
+            writeUString(m.owner);
+            uint8_t isConst = m.isConst ? 1 : 0;
+            out.write(reinterpret_cast<char*>(&isConst), 1);
+            // declared type: 0 none, 1 builtin, 2 (dotted) type name
+            uint8_t typeTag = !m.propType.has_value() ? 0
+                            : (std::holds_alternative<type::BuiltinType>(*m.propType) ? 1 : 2);
+            out.write(reinterpret_cast<char*>(&typeTag), 1);
+            if (typeTag == 1) {
+                int32_t builtin = static_cast<int32_t>(std::get<type::BuiltinType>(*m.propType));
+                out.write(reinterpret_cast<char*>(&builtin), 4);
+            } else if (typeTag == 2) {
+                const auto& parts = std::get<std::vector<ustring>>(*m.propType);
+                uint32_t partCount = static_cast<uint32_t>(parts.size());
+                out.write(reinterpret_cast<char*>(&partCount), 4);
+                for (const auto& part : parts)
+                    writeUString(part);
+            }
+        }
+    }
 }
 
 void ObjModuleType::read(std::istream& in, roxal::ptr<SerializationContext> ctx)
@@ -4645,6 +4685,51 @@ void ObjModuleType::read(std::istream& in, roxal::ptr<SerializationContext> ctx)
             if (ctypeLen)
                 in.read(ctypeUtf8.data(), ctypeLen);
             props[propHash] = ustring::fromUTF8(ctypeUtf8);
+        }
+    }
+
+    auto readUString = [&in]() {
+        uint32_t len = 0;
+        in.read(reinterpret_cast<char*>(&len), 4);
+        std::string utf8(len, '\0');
+        if (len) in.read(utf8.data(), len);
+        return ustring::fromUTF8(utf8);
+    };
+    typeMembers.clear();
+    uint32_t memberTypeCount = 0;
+    in.read(reinterpret_cast<char*>(&memberTypeCount), 4);
+    for (uint32_t i = 0; i < memberTypeCount; ++i) {
+        ustring typeName = readUString();
+        uint32_t memberCount = 0;
+        in.read(reinterpret_cast<char*>(&memberCount), 4);
+        auto& members = typeMembers[typeName];
+        members.reserve(memberCount);
+        for (uint32_t m = 0; m < memberCount; ++m) {
+            ustring memberName = readUString();
+            type::MemberInfo member;
+            uint8_t access = 0;
+            in.read(reinterpret_cast<char*>(&access), 1);
+            member.access = static_cast<type::Access>(access);
+            member.owner = readUString();
+            uint8_t isConst = 0;
+            in.read(reinterpret_cast<char*>(&isConst), 1);
+            member.isConst = isConst != 0;
+            uint8_t typeTag = 0;
+            in.read(reinterpret_cast<char*>(&typeTag), 1);
+            if (typeTag == 1) {
+                int32_t builtin = 0;
+                in.read(reinterpret_cast<char*>(&builtin), 4);
+                member.propType = static_cast<type::BuiltinType>(builtin);
+            } else if (typeTag == 2) {
+                uint32_t partCount = 0;
+                in.read(reinterpret_cast<char*>(&partCount), 4);
+                std::vector<ustring> parts;
+                parts.reserve(partCount);
+                for (uint32_t np = 0; np < partCount; ++np)
+                    parts.push_back(readUString());
+                member.propType = std::move(parts);
+            }
+            members.emplace_back(std::move(memberName), std::move(member));
         }
     }
 }

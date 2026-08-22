@@ -456,12 +456,9 @@ protected:
         // bypassing the parent-attachment chain (which fails at runtime when the
         // enclosing type's NESTED_TYPE attachment hasn't run yet).
         int16_t inFlightStackSlot { -1 };
-        struct MemberInfo {
-            ast::Access access { ast::Access::Public };
-            ustring owner;
-            bool isConst { false };
-            std::optional<VarTypeSpec> propType;
-        };
+        // The shared record (core/types.h): also what a module publishes for
+        // importers via ObjModuleType::typeMembers.
+        using MemberInfo = type::MemberInfo;
         // Insertion order preserved so callers (notably `proc init(*)` and
         // dict(obj)/to_json) can walk properties in declaration order.
         ordered_map<ustring, MemberInfo> propertyNames;
@@ -483,6 +480,15 @@ protected:
     ordered_map<ustring, TypeScope::MemberInfo>* findTypeMembers(const ustring& typeName);
     void registerTypeMembers(const ustring& typeName,
                              const ordered_map<ustring, TypeScope::MemberInfo>& members);
+    // Publish this module's registry onto its ObjModuleType so importers can
+    // read it (including from a cache load), and adopt an imported module's
+    // published entries into this module's registry.  `qualifier` is the name
+    // the importing source refers to the module by; `alsoUnqualified` covers
+    // `import m.*` / `import m: Name`, where the type is also visible bare.
+    void publishTypeMembersToModule();
+    void adoptImportedTypeMembers(const Value& importedModuleType,
+                                  const ustring& qualifier,
+                                  bool alsoUnqualified);
 
 
     struct ModuleScope : public FunctionScope

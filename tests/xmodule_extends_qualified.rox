@@ -1,0 +1,11 @@
+// Same, for a qualified import: `extends xmodule_helper.Base` joins to the
+// dotted name, which must find the imported module's published members.
+import xmodule_helper
+
+type D object extends xmodule_helper.Base:
+  var b :int = 2
+  func show():
+    print(a)
+    hello()
+
+D().show()

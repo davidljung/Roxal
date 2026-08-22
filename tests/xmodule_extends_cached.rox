@@ -1,0 +1,12 @@
+// The imported module is loaded from its .roc cache here (the runner primes
+// it), so there is no AST for it at compile time: the member metadata must
+// survive in the module cache itself. This path used to silently differ from
+// the source-compilation one.
+import xmodule_helper_cached.*
+
+type D object extends Base:
+  func show():
+    print(a)
+    hello()
+
+D().show()

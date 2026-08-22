@@ -28,10 +28,24 @@ enum class BuiltinType {
     Event
 };
 
-// Member visibility — paralleled by ast::Access (which uses the same
-// underlying ordering). Defined here so the static type system can carry
-// access information without requiring AST.h.
+// Member visibility.
 enum class Access : uint8_t { Public = 0, Private = 1 };
+
+// A declared type: a builtin, or a (possibly dotted) type name.  Deliberately
+// the same variant a parsed declaration's type is represented by, so one can be
+// stored here without conversion.
+using DeclaredType = std::variant<BuiltinType, std::vector<ustring>>;
+
+// What a type declares under one member name.  Covers properties, methods,
+// nested type names and synthesized accessor entries alike -- hence a flat
+// name -> info record rather than Type::ObjectType's split property and method
+// lists.
+struct MemberInfo {
+    Access access { Access::Public };
+    ustring owner;                            // type that declared it
+    bool isConst { false };
+    std::optional<DeclaredType> propType;     // declared type, for typed properties
+};
 
 std::string to_string(BuiltinType t);
 std::optional<BuiltinType> builtinTypeFromName(const std::string& name);
