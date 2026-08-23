@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
 
-project(roxal VERSION 0.8.37 LANGUAGES CXX C)
+project(roxal VERSION 0.8.38 LANGUAGES CXX C)
 set(ROXAL_PRERELEASE "pre" CACHE STRING "SemVer prerelease label (e.g. alpha.1, rc.1)")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -441,6 +441,8 @@ set(CORE_SOURCES
 )
 
 set(COMPILER_SOURCES
+    compiler/Annotations.cpp
+    compiler/annotations_test.cpp
     compiler/ASTEditor.cpp
     compiler/ASTGenerator.cpp
     compiler/ASTGraphviz.cpp

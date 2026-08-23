@@ -626,6 +626,14 @@ protected:
     void checkAnnotationArgs(const std::vector<ptr<ast::Annotation>>& annotations,
                              const ptr<ast::AST>& location);
 
+    // Retain the annotations of a top-level var/const/type declaration on the
+    // module type (ObjModuleType::declAnnotations), the way visit(FuncDecl)
+    // retains a callable's on its ObjFunction.  No-ops when the list is empty
+    // or the declaration is not directly at module scope.
+    void recordDeclAnnotations(const ustring& name,
+                               const std::vector<ptr<ast::Annotation>>& annotations,
+                               const ptr<ast::AST>& location);
+
     ValueType builtinToValueType(ast::BuiltinType bt);
 
     void emitTypeName(const ast::TypeName& components); // emit namedVariable + GetProp chain for dotted type names

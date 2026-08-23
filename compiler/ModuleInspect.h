@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Annotations.h"
 #include "BuiltinModule.h"
 #include "ASTGenerator.h"
 
@@ -34,6 +35,18 @@ private:
     Value inspect_main_module_builtin(ArgsView args);
 
     Value signatureValue(ObjFunction* fn);
+
+    // One AnnotationInfo mirror object, arguments evaluated.  `owner` is the
+    // module the annotation was declared in (for bare names and @suffix
+    // lookups).  Shared by signatures() and members() so the two surfaces
+    // cannot drift.  Takes the caller's no-park cover, which evaluating an
+    // annotation argument requires (see Annotations.h).
+    Value annotationInfoValue(const ast::Annotation& annot, ObjModuleType* owner,
+                              GCNoParkCover& cover);
+
+    // The list of AnnotationInfo for an annotation list, as above.
+    Value annotationInfoList(const std::vector<ptr<ast::Annotation>>& annotations,
+                             ObjModuleType* owner, GCNoParkCover& cover);
 
     Value inspect_network_builtin(ArgsView args);
     Value inspect_networks_builtin(ArgsView args);

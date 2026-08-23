@@ -4584,6 +4584,20 @@ void ObjModuleType::write(std::ostream& out, roxal::ptr<SerializationContext> ct
             }
         }
     }
+
+    // Annotations on top-level var/const/type declarations (see
+    // ObjModuleType::declAnnotations): the declaration counterpart of the
+    // annotations ObjFunction::write already persists for callables.
+    uint32_t declAnnotCount = static_cast<uint32_t>(declAnnotations.size());
+    out.write(reinterpret_cast<char*>(&declAnnotCount), 4);
+    for (const auto& entry : declAnnotations) {
+        int32_t nameHash = entry.first;
+        out.write(reinterpret_cast<char*>(&nameHash), 4);
+        uint32_t annCount = static_cast<uint32_t>(entry.second.size());
+        out.write(reinterpret_cast<char*>(&annCount), 4);
+        for (const auto& a : entry.second)
+            writeAnnotation(out, *a);
+    }
 }
 
 void ObjModuleType::read(std::istream& in, roxal::ptr<SerializationContext> ctx)
@@ -4732,6 +4746,28 @@ void ObjModuleType::read(std::istream& in, roxal::ptr<SerializationContext> ctx)
             members.emplace_back(std::move(memberName), std::move(member));
         }
     }
+
+    // Declaration annotations (see the matching block in write()).  The counts
+    // are sanity-bounded so a corrupt or truncated cache invalidates -- the
+    // module-cache reader wraps this in catch(...) and recompiles -- rather
+    // than misparsing the rest of the record.
+    declAnnotations.clear();
+    uint32_t declAnnotCount = 0;
+    in.read(reinterpret_cast<char*>(&declAnnotCount), 4);
+    if (!in || declAnnotCount > 1000000)
+        throw std::runtime_error("module cache: implausible declaration annotation count");
+    for (uint32_t i = 0; i < declAnnotCount; ++i) {
+        int32_t nameHash = 0;
+        in.read(reinterpret_cast<char*>(&nameHash), 4);
+        uint32_t annCount = 0;
+        in.read(reinterpret_cast<char*>(&annCount), 4);
+        if (!in || annCount > 256)
+            throw std::runtime_error("module cache: implausible annotation count");
+        auto& annots = declAnnotations[nameHash];
+        annots.reserve(annCount);
+        for (uint32_t a = 0; a < annCount; ++a)
+            annots.push_back(readAnnotation(in));
+    }
 }
 
 void ObjModuleType::trace(ValueVisitor& visitor) const
@@ -4760,6 +4796,7 @@ void ObjModuleType::dropReferences()
     cstructArch.clear();
     sourcePath = ustring();
     propertyCTypes.clear();
+    declAnnotations.clear();
 }
 
 void ObjModuleType::registerModuleAlias(const ustring& alias,

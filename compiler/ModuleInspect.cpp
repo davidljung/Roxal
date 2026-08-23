@@ -1,4 +1,5 @@
 #include "ModuleInspect.h"
+#include "Annotations.h"
 #include "VM.h"
 #include "Object.h"
 #include "ASTGenerator.h"
@@ -1540,129 +1541,13 @@ Value ModuleInspect::inspect_parse_file_builtin(ArgsView args)
 // contains, what a callable's signature and annotations are, and a call whose
 // argument list is only known at runtime.  Annotations are retained on
 // ObjFunction (and survive .roc caching), but their arguments are stored as
-// unevaluated AST expressions -- evalAnnotArg() below is the evaluator, and it
-// accepts exactly the literal family that the .roc serializer can round-trip.
+// unevaluated AST expressions -- evalAnnotationArg() in Annotations.h is the
+// shared evaluator, and it accepts exactly the literal family that the .roc
+// serializer can round-trip.  The same header reads the declaration-level
+// annotations (ObjModuleType::declAnnotations) that members() reports.
 // ---------------------------------------------------------------------------
 
 namespace {
-
-Value numValue(const std::variant<int32_t,int64_t,double>& n)
-{
-    if (std::holds_alternative<int32_t>(n))
-        return Value::intVal(int64_t(std::get<int32_t>(n)));
-    if (std::holds_alternative<int64_t>(n))
-        return Value::intVal(std::get<int64_t>(n));
-    return Value::realVal(std::get<double>(n));
-}
-
-ObjModuleType* ownerModule(ObjFunction* fn)
-{
-    if (!fn)
-        return nullptr;
-    Value mv = fn->moduleType.strongRef();
-    return (mv.isObj() && isModuleType(mv)) ? asModuleType(mv) : nullptr;
-}
-
-// Resolve a bare name in an annotation argument: the declaring module's
-// variables first, then the globals (which is where the sys surface lives).
-Value resolveName(const ustring& name, ObjFunction* fn, VM& vm)
-{
-    if (ObjModuleType* mod = ownerModule(fn)) {
-        auto v = mod->vars.load(name.hashCode());
-        if (v.has_value())
-            return v.value();
-    }
-    auto g = vm.loadGlobal(name);
-    if (g.has_value())
-        return g.value();
-    return Value::nilVal();
-}
-
-// Apply a literal suffix (2s, 100ms, 5kg) by calling the @suffix-registered
-// function, exactly as a compiled suffixed literal would.  Registrations live
-// on the module that declared them; sys's are visible everywhere.
-Value applySuffix(const ustring& suffix, const Value& literal, ObjFunction* fn, VM& vm)
-{
-    ustring funcName;
-    ObjModuleType* declaring = nullptr;
-    if (ObjModuleType* mod = ownerModule(fn)) {
-        auto it = mod->registeredSuffixes.find(suffix);
-        if (it != mod->registeredSuffixes.end()) {
-            funcName = it->second;
-            declaring = mod;
-        }
-    }
-    if (funcName.isEmpty()) {
-        Value sysMod = vm.getBuiltinModuleType(toUnicodeString("sys"));
-        if (sysMod.isObj() && isModuleType(sysMod)) {
-            ObjModuleType* sys = asModuleType(sysMod);
-            auto it = sys->registeredSuffixes.find(suffix);
-            if (it != sys->registeredSuffixes.end()) {
-                funcName = it->second;
-                declaring = sys;
-            }
-        }
-    }
-    if (funcName.isEmpty() || !declaring)
-        throw std::runtime_error("inspect: annotation uses unknown literal suffix '"
-                                 + toUTF8StdString(suffix) + "'");
-
-    auto fv = declaring->vars.load(funcName.hashCode());
-    if (!fv.has_value() || !isClosure(fv.value()))
-        throw std::runtime_error("inspect: suffix function '" + toUTF8StdString(funcName)
-                                 + "' is not callable");
-    auto result = vm.invokeClosure(asClosure(fv.value()), { literal });
-    if (result.first != ExecutionStatus::OK)
-        throw std::runtime_error("inspect: evaluating literal suffix '"
-                                 + toUTF8StdString(suffix) + "' failed");
-    return result.second;
-}
-
-Value evalAnnotArg(const ptr<ast::Expression>& e, ObjFunction* fn, VM& vm)
-{
-    using namespace ast;
-    if (!e)
-        return Value::nilVal();
-    if (auto s = dynamic_ptr_cast<Str>(e))
-        return Value::stringVal(s->str);
-    if (auto n = dynamic_ptr_cast<Num>(e))
-        return numValue(n->num);
-    if (auto b = dynamic_ptr_cast<Bool>(e))
-        return b->value ? Value::trueVal() : Value::falseVal();
-    if (auto sn = dynamic_ptr_cast<SuffixedNum>(e))
-        return applySuffix(sn->suffix, numValue(sn->num), fn, vm);
-    if (auto ss = dynamic_ptr_cast<SuffixedStr>(e))
-        return applySuffix(ss->suffix, Value::stringVal(ss->str), fn, vm);
-    if (auto l = dynamic_ptr_cast<List>(e)) {
-        Value lst = Value::listVal();
-        for (const auto& el : l->elements)
-            asList(lst)->append(evalAnnotArg(el, fn, vm));
-        return lst;
-    }
-    if (auto d = dynamic_ptr_cast<Dict>(e)) {
-        Value dict = Value::dictVal();
-        for (const auto& entry : d->entries)
-            asDict(dict)->store(evalAnnotArg(entry.first, fn, vm),
-                                evalAnnotArg(entry.second, fn, vm));
-        return dict;
-    }
-    if (auto u = dynamic_ptr_cast<UnaryOp>(e)) {
-        if (u->op != UnaryOp::Negate)
-            throw std::runtime_error("inspect: annotation argument is not a literal");
-        return roxal::negate(evalAnnotArg(u->arg, fn, vm));
-    }
-    if (auto v = dynamic_ptr_cast<Variable>(e))
-        return resolveName(v->name, fn, vm);
-    // `nil` is a bare Literal rather than a node type of its own, so it has to
-    // be recognised after the specific literal kinds above (which derive from it)
-    if (auto lit = dynamic_ptr_cast<Literal>(e))
-        if (lit->literalType == Literal::LiteralType::Nil)
-            return Value::nilVal();
-    // Anything else is rejected at compile time (see RoxalCompiler's annotation
-    // validation), so reaching here means a node kind was added without
-    // teaching this evaluator about it.
-    throw std::runtime_error("inspect: annotation argument is not a literal");
-}
 
 // The declaration line of a callable: an annotation's line when there is one
 // (it sits directly above the declaration), else the first line of its body.
@@ -1712,6 +1597,36 @@ bool isCallableValue(const Value& v)
 
 } // anonymous namespace
 
+Value ModuleInspect::annotationInfoValue(const ast::Annotation& annot, ObjModuleType* owner,
+                                        GCNoParkCover& cover)
+{
+    Value aV = moduleClassInstance(moduleTypeValue, "AnnotationInfo");
+    ObjectInstance* ann = asObjectInstance(aV);
+    ann->setProperty("name", Value::stringVal(annot.name));
+    Value posV = Value::listVal();
+    Value namedV = Value::dictVal();
+    for (const auto& arg : annot.args) {
+        Value av = evalAnnotationArg(arg.second, owner, vm(), cover);
+        if (arg.first.isEmpty())
+            asList(posV)->append(av);
+        else
+            asDict(namedV)->store(Value::stringVal(arg.first), av);
+    }
+    ann->setProperty("args", posV);
+    ann->setProperty("named", namedV);
+    return aV;
+}
+
+Value ModuleInspect::annotationInfoList(const std::vector<ptr<ast::Annotation>>& annotations,
+                                        ObjModuleType* owner, GCNoParkCover& cover)
+{
+    Value lst = Value::listVal();
+    for (const auto& a : annotations)
+        if (a)
+            asList(lst)->append(annotationInfoValue(*a, owner, cover));
+    return lst;
+}
+
 Value ModuleInspect::signatureValue(ObjFunction* fn)
 {
     // Evaluating a suffixed annotation argument (2s) re-enters the interpreter,
@@ -1754,27 +1669,8 @@ Value ModuleInspect::signatureValue(ObjFunction* fn)
     sig->setProperty("return_types", returnsV);
     sig->setProperty("is_proc", isProc ? Value::trueVal() : Value::falseVal());
 
-    Value annotsV = Value::listVal();
-    for (const auto& a : fn->annotations) {
-        if (!a)
-            continue;
-        Value aV = moduleClassInstance(moduleTypeValue, "AnnotationInfo");
-        ObjectInstance* ann = asObjectInstance(aV);
-        ann->setProperty("name", Value::stringVal(a->name));
-        Value posV = Value::listVal();
-        Value namedV = Value::dictVal();
-        for (const auto& arg : a->args) {
-            Value av = evalAnnotArg(arg.second, fn, vm());
-            if (arg.first.isEmpty())
-                asList(posV)->append(av);
-            else
-                asDict(namedV)->store(Value::stringVal(arg.first), av);
-        }
-        ann->setProperty("args", posV);
-        ann->setProperty("named", namedV);
-        asList(annotsV)->append(aV);
-    }
-    sig->setProperty("annotations", annotsV);
+    sig->setProperty("annotations",
+                     annotationInfoList(fn->annotations, annotationOwnerModule(fn), nativeCover));
 
     if (fn->chunk && !fn->chunk->sourceName.isEmpty())
         sig->setProperty("source_file", Value::stringVal(fn->chunk->sourceName));
@@ -1788,11 +1684,18 @@ Value ModuleInspect::inspect_members_builtin(ArgsView args)
         throw std::invalid_argument("inspect.members expects a module");
     ObjModuleType* mod = asModuleType(args[0]);
 
+    // Same cover signatureValue takes: building the Member mirrors evaluates
+    // annotation arguments, and a suffixed one (2s) re-enters the interpreter,
+    // so a collection could be requested while `entries` and the half-built
+    // mirrors are reachable only from these C++ frames.
+    SimpleMarkSweepGC::GCNoParkScope nativeCover;
+
     struct Entry {
         ustring name;
         Value value;
         std::string kind;
         int line;
+        ObjFunction* fn;    // first overload, for callables; else nullptr
     };
     std::vector<Entry> entries;
     for (const auto& nv : mod->vars.snapshot()) {
@@ -1800,6 +1703,7 @@ Value ModuleInspect::inspect_members_builtin(ArgsView args)
         const Value& v = nv.second;
         std::string kind;
         int line = 0;
+        ObjFunction* fn = nullptr;
         if (isModuleType(v))
             kind = "module";
         else if (isObjectType(v) || isTypeSpec(v))
@@ -1808,16 +1712,17 @@ Value ModuleInspect::inspect_members_builtin(ArgsView args)
             auto fns = functionsOf(v);
             bool isProc = false;
             if (!fns.empty()) {
-                line = declLine(fns.front());
-                if (fns.front()->funcType.has_value() && fns.front()->funcType.value()
-                    && fns.front()->funcType.value()->func.has_value())
-                    isProc = fns.front()->funcType.value()->func.value().isProc;
+                fn = fns.front();
+                line = declLine(fn);
+                if (fn->funcType.has_value() && fn->funcType.value()
+                    && fn->funcType.value()->func.has_value())
+                    isProc = fn->funcType.value()->func.value().isProc;
             }
             kind = isProc ? "proc" : "func";
         }
         else
             kind = mod->constVars.count(name.hashCode()) ? "const" : "var";
-        entries.push_back(Entry{ name, v, kind, line });
+        entries.push_back(Entry{ name, v, kind, line, fn });
     }
 
     // Callables in declaration order (the order tests are written in matters to
@@ -1840,6 +1745,22 @@ Value ModuleInspect::inspect_members_builtin(ArgsView args)
         m->setProperty("name", Value::stringVal(e.name));
         m->setProperty("value", e.value);
         m->setProperty("kind", Value::stringVal(toUnicodeString(e.kind)));
+
+        // A declaration's own annotations win over the ones on the value it
+        // holds, so '@a var f = <closure>' reports @a rather than the
+        // closure's.  A plain 'func'/'proc' declaration records nothing in
+        // declAnnotations, so it falls through to ObjFunction::annotations and
+        // members() agrees with signatures().  An overload set reports the
+        // first overload's, matching how `line` is chosen above.
+        if (const auto* declNodes = declAnnotationNodes(mod, e.name))
+            m->setProperty("annotations", annotationInfoList(*declNodes, mod, nativeCover));
+        else if (e.fn)
+            m->setProperty("annotations",
+                           annotationInfoList(e.fn->annotations, annotationOwnerModule(e.fn),
+                                              nativeCover));
+        else
+            m->setProperty("annotations", Value::listVal());
+
         asList(lst)->append(mV);
     }
     return lst;

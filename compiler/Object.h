@@ -2203,6 +2203,21 @@ struct ObjModuleType : public ObjTypeSpec
     // property ctype annotations: type name hash -> (prop name hash -> ctype)
     std::unordered_map<int32_t, std::unordered_map<int32_t, ustring>> propertyCTypes;
 
+    // Annotations attached to this module's top-level declarations (var, const
+    // and type), by declaration name hash -- the declaration counterpart of
+    // ObjFunction::annotations, which already retains them for callables.
+    // Retained in the same shape: the nodes are data records reconstructed by
+    // readAnnotation(), not a live parse tree, so they survive the bytecode
+    // cache and a host or tool never has to re-parse the source to see them.
+    // Kept here rather than on VariablesMap::MonitoredValue because that slot
+    // is the hot MVCC/signal cell shared with ObjectInstance::PropertyMap,
+    // while this is cold, per-declaration data.  A declaring destructure
+    // records the same list under each target name.
+    // ptr<ast::Annotation> is a shared_ptr, not a GC object and not a Value, so
+    // (unlike the CLAUDE.md rule for Value members) this needs no tracing in
+    // ObjModuleType::trace() / SimpleMarkSweepGC.cpp.
+    std::unordered_map<int32_t, std::vector<ptr<ast::Annotation>>> declAnnotations;
+
     // Compile-time member metadata for the types this module declares, so a
     // module importing this one can resolve bare inherited names inside a
     // subtype of one of them.  The compiler's own per-module registry does not

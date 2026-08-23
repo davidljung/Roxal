@@ -1438,6 +1438,84 @@ where both reference the same `foo.module` produces two distinct
 contained — but it means an extra pass is needed to glue the deserialized
 fragments back into a coherent module graph.
 
+### Annotations at runtime
+
+Annotations are retained past compilation in exactly two places, both of them
+*data records* rebuilt by `readAnnotation()` (`compiler/Object.cpp`) rather than
+a live parse tree, and both serialized into the `.roc`:
+
+* `ObjFunction::annotations` — for callables, assigned in
+  `RoxalCompiler::visit(FuncDecl)` / `visit(Function)`.
+* `ObjModuleType::declAnnotations` — for the module's top-level `var`, `const`
+  and `type` declarations, keyed by name hash, recorded by
+  `RoxalCompiler::recordDeclAnnotations()`.
+
+**Why the module type and not the variable slot.** The obvious alternative,
+`VariablesMap::MonitoredValue` ([compiler/Value.h](compiler/Value.h)), is the
+hot MVCC/signal cell and is shared with `ObjectInstance::PropertyMap` — putting
+cold, per-declaration metadata there would cost a field on every property of
+every instance. `declAnnotations` is keyed the way `VariablesMap` and
+`constVars` already are, so a lookup from a name is one hash, and nothing is
+added to a hot path. It is also deliberately *general* rather than one lowered
+map per annotation (the `@cstruct` → `cstructArch`, `@ctype` → `propertyCTypes`
+pattern): those cost a field, a serializer branch and a merge branch each time,
+and they leave `inspect` unable to see anything else. `@cstruct` keeps its
+lowered form as well, because the VM consumes it directly when rebuilding FFI
+metadata.
+
+Adding to `ObjModuleType` means the `propertyCTypes` checklist: `write`, `read`,
+`dropReferences`, `mergeModuleTypes` (in `reconcileModuleReferences` — only the
+incremental/re-link path exercises it) and a `ModuleCacheVersion` bump. **GC:**
+`ptr<ast::Annotation>` is a `shared_ptr`, and no AST node holds a `Value`, so
+this needs no tracing in `ObjModuleType::trace()` or `SimpleMarkSweepGC.cpp` —
+the CLAUDE.md rule about new `Value` members does not apply.
+
+Argument expressions are restricted to the family the serializer round-trips
+(number, string, bool, nil, list/dict of those, negated number, suffixed
+literal, bare name), enforced by `RoxalCompiler::checkAnnotationArgs()` for
+declarations as well as callables.
+
+#### Reading them: two paths, and only one touches the VM
+
+[compiler/Annotations.h](compiler/Annotations.h) splits deliberately.
+
+The **static** path is what a native module (a robot module acting on
+`@joint(...) var elbow = 0`) uses. `annotationView()` converts one
+`ast::Annotation` into an `AnnotationView` of `AnnotationArg`s — a plain C++
+variant holding no `Value`. It is a pure function of the node, so it needs no
+VM, no GC and no Roxal thread, may be called during module registration or
+before the VM exists, and its result can be kept in a client's own C++ state
+indefinitely with no typed root. Two argument forms stay **unresolved**, which
+is precisely what keeps the VM out: a suffixed literal is reported as
+`{literal, suffix}` (evaluating `100hz` would run the `@suffix` function and
+build a `quantity` object the client would then take apart again), and a bare
+name is reported as the identifier (the referenced module var may hold a
+runtime handle — `@cfunc(lib=cvxlib)` where `cvxlib` is a `sys.loadlib()`
+result; a client that wants the value calls `mod->vars.load()` itself, as
+`FFI.cpp` already does). `declAnnotationsOf()` / `annotationsOf()` are thin
+wrappers over the lookup plus the converter; the converter is separate because
+it also serves annotation sites that are parsed but not retained (imports keep
+only their names, parameters and type properties are dropped) and annotations
+read off a freshly parsed tree.
+
+The **evaluating** path exists for one caller: `inspect.signatures()` /
+`members()` promise Roxal code *evaluated* arguments, so `evalAnnotationArg()`
+resolves names and calls `@suffix` functions, which allocates and re-enters the
+VM. It must run on the VM thread under a no-park cover — which it takes as a
+`GCNoParkScope&` parameter, so the cover cannot be forgotten and cannot be a
+temporary that dies at the semicolon. That matters because its `Value`s land in
+C++ frames (and, for `ModuleInspect`, half-built mirror objects) that the
+conservative parked-stack scan cannot fully see, and refcounts alone do not
+survive a tracing sweep.
+
+The static half is covered by `compiler/annotations_test.cpp`, reached from
+Roxal as `_runtests('annotations')` (`tests/annotations_selftest.rox`) — a C++
+test because the API under test is C++ and touches no `Value`, so there is
+nothing for a plain `.rox` test to call. It builds `ast::Annotation` nodes by
+hand rather than parsing, which pins the contract that conversion is a pure
+function of a node. The evaluating half is covered by
+`tests/inspect_signatures.rox` and `tests/inspect_var_annotations.rox`.
+
 ### `reconcileModuleReferences`
 
 After a successful `loadModuleFromCache`, `reconcileModuleReferences`

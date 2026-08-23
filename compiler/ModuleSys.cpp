@@ -1,4 +1,5 @@
 #include "ModuleSys.h"
+#include "Annotations.h"
 #include "VM.h"
 #include "Object.h"
 #include "Chunk.h"
@@ -2352,6 +2353,27 @@ Value ModuleSys::runtests_builtin(VM& vm, ArgsView args)
 
         std::cout << "Passed " << passes << " failed " << fails << std::endl;
     }
+    else if (suite == "annotations") {
+        auto results = testAnnotations();
+
+        int passes = 0;
+        int fails = 0;
+        for (const auto& result : results) {
+            std::cout << "Test: " << std::get<0>(result) << " ";
+            bool passed = std::get<1>(result);
+            if (passed) {
+                std::cout << "passed";
+                passes++;
+            }
+            else {
+                std::cout << "failed";
+                fails++;
+            }
+            std::cout << " " << std::get<2>(result) << std::endl;
+        }
+
+        std::cout << "Passed " << passes << " failed " << fails << std::endl;
+    }
     else if (suite == "orient") {
         auto results = testOrientConversions();
 
@@ -3438,7 +3460,10 @@ Value ModuleSys::gc_config_builtin(VM& vm, ArgsView args)
 // byte of a raw writeValue stream (always a ValueType tag <= ~30 or the Boxed
 // sentinel 0xff), so a foreign/headerless stream is cleanly rejected.
 static constexpr uint8_t SerializeMagic = 0x52;        // 'R'
-static constexpr uint32_t SerializeFormatVersion = 3;
+// 4: ObjModuleType's record grew declAnnotations (annotations on top-level
+// var/const/type declarations).  A serialized function embeds its module type
+// via ObjFunction::write, so the shared writeValue() stream changed shape.
+static constexpr uint32_t SerializeFormatVersion = 4;
 
 Value ModuleSys::serialize_builtin(VM& vm, ArgsView args)
 {

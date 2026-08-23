@@ -1,0 +1,6 @@
+var counter: @meta args=["a var"] named=["tag=v", "factor=-2.5"]
+const LIMIT: @meta args=["a const"] named=["limit=10"]
+type Widget: @meta args=["a type"] named=["arch=64"]
+var wide: @meta args=[2s, -7, ["a", "b"]] named=["flag=true", "none=nil"]
+func annotated_func: @meta args=["a func"] named=[]
+2s is time=true

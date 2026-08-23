@@ -1,0 +1,21 @@
+// The counterpart of inspect_var_annotations: the annotated module is loaded
+// from its .roc cache here (the runner primes it), so nothing about its
+// declarations can come from an AST -- only from ObjModuleType::declAnnotations
+// as serialized into the module record.
+import inspect
+import inspect_annot_helper_cached
+
+var by_name = {}
+for m in inspect.members(inspect_annot_helper_cached):
+  by_name[m.name] = m
+
+for name in ['counter', 'LIMIT', 'Widget', 'wide', 'annotated_func']:
+  var m = by_name[name]
+  var a = m.annotation('meta')
+  var names = []
+  for k in a.named:
+    names.append(k + '=' + string(a.named[k]))
+  print(m.kind + ' ' + m.name + ': @' + a.name + ' args=' + string(a.args) + ' named=' + string(names))
+
+// evaluated from the cache, not re-parsed: the suffix function still runs
+print('2s is time=' + by_name['wide'].annotation('meta').arg(0).is_time)

@@ -1,0 +1,67 @@
+// inspect.members() reports annotations for every kind of module member, not
+// just callables: var, const, a destructuring declaration and a type all keep
+// theirs at runtime (ObjModuleType::declAnnotations), and their arguments are
+// evaluated by the same evaluator signatures() uses.
+import inspect
+
+const SCALE = 3
+
+@meta('a var', tag='v', factor=-2.5)
+var counter = 0
+
+@meta('a const', limit=10)
+const LIMIT = 10
+
+func pair() -> [int, int]:
+  return [1, 2]
+
+// the annotation applies to the declaration, so every target records it
+@meta('destructured')
+var [left, right] = pair()
+
+@meta('a type', arch=64)
+type Widget object:
+  var w :int = 0
+
+// the whole argument family evalAnnotArg handles: suffixed literal, negated
+// number, bare name, list, dict, bool and nil
+@meta(2s, -7, SCALE, ['a', 'b'], {'k': 1}, flag=true, none=nil)
+var wide = 0
+
+@meta('a func')
+func annotated_func():
+  return 1
+
+// a declaration's own annotations win over the ones on the value it holds
+@meta('on the var, not the closure')
+var holds_a_func = annotated_func
+
+func describe(m):
+  var parts = []
+  for a in m.annotations:
+    var names = []
+    for k in a.named:
+      names.append(k + '=' + string(a.named[k]))
+    parts.append('@' + a.name + ' args=' + string(a.args) + ' named=' + string(names))
+  print(m.kind + ' ' + m.name + ': ' + string(parts))
+
+var by_name = {}
+for m in inspect.members(inspect.calling_module()):
+  by_name[m.name] = m
+
+for name in ['counter', 'LIMIT', 'left', 'right', 'Widget', 'wide',
+             'annotated_func', 'holds_a_func']:
+  describe(by_name[name])
+
+// the Member helpers mirror Signature's
+var c = by_name['counter']
+var meta = c.annotation('meta')
+print('has meta=' + c.has('meta') + ' has nope=' + c.has('nope'))
+print('tag=' + meta.arg('tag') + ' first=' + meta.arg(0))
+print('missing=' + string(c.annotation('nope')))
+
+// an unannotated member reports an empty list, not nil
+print('pair annotations=' + by_name['pair'].annotations)
+
+// suffixed arguments really are evaluated, not left as text
+print('2s is time=' + by_name['wide'].annotation('meta').arg(0).is_time)

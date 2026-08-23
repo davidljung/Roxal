@@ -1,0 +1,20 @@
+// Imported by inspect_var_annotations_cached, which loads this from its .roc
+// cache: there is no AST for it at compile time, so the declaration
+// annotations must survive in the module record itself.  Kept separate so a
+// --recompile test cannot clear the primed cache.
+@meta('a var', tag='v', factor=-2.5)
+var counter = 0
+
+@meta('a const', limit=10)
+const LIMIT = 10
+
+@meta('a type', arch=64)
+type Widget object:
+  var w :int = 0
+
+@meta(2s, -7, ['a', 'b'], flag=true, none=nil)
+var wide = 0
+
+@meta('a func')
+func annotated_func():
+  return 1

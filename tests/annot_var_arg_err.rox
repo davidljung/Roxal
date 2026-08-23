@@ -1,0 +1,8 @@
+// Annotation arguments on a declaration are compile-time metadata retained in
+// the module record, so they are restricted to the literal family the cache can
+// round-trip -- exactly as they already were on a func declaration.
+func f():
+  return 1
+
+@meta(f())
+var x = 1

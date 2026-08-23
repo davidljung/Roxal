@@ -2657,7 +2657,8 @@ The `inspect` module is the stable surface for tools, editors and IDEs: it
 parses Roxal source into a tree of plain Roxal *mirror node* objects (one class
 per AST node kind, e.g. `inspect.BinaryOp`, `inspect.IfStatement`), lets you
 edit that tree with ordinary assignment, renders it back to source, compiles
-it, and inspects the live dataflow network.
+it, inspects the live dataflow network, and reflects over live module members
+and callables.
 
 ```roxal
 import inspect
@@ -2705,6 +2706,26 @@ comparison node into the network). `inspect.networks()` and
 graph back to the program text. Signals returned by inspect are borrowed
 references: reading `.value`/`.name` is always safe and dropping them never
 tears down network parts.
+
+Runtime reflection is the third surface, over *live objects* rather than source
+text: `inspect.members(module)` lists a module's members as `Member` objects
+(`name`, `value`, `kind`, `annotations`), `inspect.signatures(callable)` returns
+one `Signature` per overload (parameters, return types, `annotations`), and
+`inspect.call(callable, args, named)` calls something with an argument list only
+known at runtime. `inspect.calling_module()` gets the caller's own module.
+
+Annotations are reported for *every* kind of member, not just callables: a
+module-level `var`, `const` or `type` keeps its annotations at runtime and
+through the bytecode cache, so a tool can act on `@df(x=10) var a = 1` without
+re-parsing the source (and can read a module that was loaded from its `.roc`,
+where there is no source tree at all). Arguments are evaluated — literals, lists
+and dicts of those, negated numbers, suffixed literals like `2s`, and bare names
+(resolved as module variables, then globals) — so `m.annotation('df').arg('x')`
+yields `10`, not text. That restricts what an annotation argument may be: a
+non-literal such as `@meta(f())` is a compile error, on a declaration exactly as
+it already was on a function. `Member` and `Signature` share the
+`annotation(name)` / `has(name)` helpers. A declaration's own annotations win
+over any on the value it holds, so `@a var f = some_closure` reports `@a`.
 
 Mirror-field naming: C++ camelCase becomes snake_case; names that collide with
 grammar keywords are adjusted (`function` for `func`, `becomes_expr`,

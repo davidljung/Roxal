@@ -1,10 +1,12 @@
 # inspect — source introspection for tools, editors and IDEs.
 #
-# Two surfaces:
+# Three surfaces:
 #   1. AST access: parse() turns Roxal source into a tree of mirror node
 #      objects (one class per AST node kind, generated below).  The tree is
 #      plain Roxal data — read it, edit it with ordinary assignment, walk it.
 #   2. Live dataflow-network introspection (network(), signals(), ...).
+#   3. Runtime reflection over live objects rather than source text:
+#      members(), signatures() and call().
 #
 # Mirror nodes carry source positions (start_line/start_col/end_line/end_col;
 # lines from 1, columns from 0), a parent back-reference, and comment
@@ -291,6 +293,18 @@ type Member object:
   var name:string = ''
   var value                  # the live value
   var kind:string = ''       # 'func' | 'proc' | 'type' | 'var' | 'const' | 'module'
+  var annotations = []       # list of AnnotationInfo, on the declaration
+
+  func annotation(name :string):
+    """the AnnotationInfo with this name, or nil"""
+    for a in annotations:
+      if a.name == name:
+        return a
+    return nil
+
+  func has(name :string) -> bool:
+    """true if an annotation with this name is present"""
+    return annotation(name) != nil
 
   proc init(*):
     """construct a Member, properties as named arguments"""
@@ -299,7 +313,12 @@ type Member object:
 @builtin
 func members(module) -> list:
   """the members of a module, as Member objects.  Callables come first in
-  declaration order (by source line), then everything else by name"""
+  declaration order (by source line), then everything else by name.
+
+  Every kind of member reports its annotations, not just callables: a
+  declaration's own annotations win, so '@a var f = <closure>' reports @a,
+  while a plain func/proc reports the ones on its callable (the first
+  overload's).  Arguments are evaluated as for signatures()"""
 
 @builtin
 func signatures(callable) -> list:

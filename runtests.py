@@ -378,6 +378,9 @@ inspect_tests = [
     # runtime reflection (live objects, not source text)
     'inspect_members', 'inspect_signatures', 'inspect_call', 'inspect_call_err',
     'inspect_modctx',
+    # annotations retained on module-level declarations (var/const/type)
+    'inspect_var_annotations', 'inspect_var_annotations_cached', 'annot_var_arg_err',
+    'annotations_selftest',
     # dfdoc (diagram document library) is pure Roxal over inspect
     'dfdoc_ops_basic', 'dfdoc_names', 'dfdoc_feedback', 'dfdoc_load_save',
     'dfdoc_comments', 'dfdoc_runs', 'dfdoc_palette', 'dfdoc_check',
@@ -998,6 +1001,16 @@ try:
             subprocess.run([roxal, '--precompile', os.path.relpath(helper, os.getcwd())],
                            capture_output=True)
             own_cache = os.path.join(test_dir, '.xmodule_extends_cached.roc')
+            if os.path.exists(own_cache):
+                os.remove(own_cache)
+        if test == 'inspect_var_annotations_cached':
+            # The annotated helper must come from its .roc, where there is no
+            # AST to fall back on: prime its cache, then drop only this test's
+            # own cache so the importing module recompiles.
+            helper = os.path.join(test_dir, 'inspect_annot_helper_cached.rox')
+            subprocess.run([roxal, '--precompile', os.path.relpath(helper, os.getcwd())],
+                           capture_output=True)
+            own_cache = os.path.join(test_dir, '.inspect_var_annotations_cached.roc')
             if os.path.exists(own_cache):
                 os.remove(own_cache)
         if test == 'forward_import_registry_collision':

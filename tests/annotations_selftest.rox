@@ -1,0 +1,9 @@
+# C++-level static annotation-reading tests (testAnnotations() in
+# compiler/annotations_test.cpp): converts hand-built ast::Annotation nodes into
+# AnnotationViews and checks the whole admitted argument family -- scalars,
+# folded negation, unresolved bare names, suffixed literals reported as
+# {literal, suffix}, nested lists/dicts, and the malformed '-"x"' case.
+# The API under test is C++ and touches no Value, so there is nothing for a
+# plain .rox test to call; the evaluating counterpart is covered by
+# inspect_signatures and inspect_var_annotations.
+_runtests('annotations')

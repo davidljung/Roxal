@@ -84,7 +84,7 @@ static unsigned long currentProcessId()
     return static_cast<unsigned long>(::getpid());
 #endif
 }
-constexpr std::uint32_t ModuleCacheVersion = 58;   // 58: using a name before its 'var'/'const' declaration in the same block is a compile error
+constexpr std::uint32_t ModuleCacheVersion = 59;   // 59: module record carries declAnnotations (annotations on top-level var/const/type declarations)
 
 std::filesystem::path moduleCachePathFor(const std::filesystem::path& sourcePath) {
     if (sourcePath.empty())
@@ -499,6 +499,10 @@ void RoxalCompiler::reconcileModuleReferences(const Value& function) const
                 if (tgtProps.find(pkv.first) == tgtProps.end())
                     tgtProps[pkv.first] = pkv.second;
             }
+        }
+        for (const auto& kv : source->declAnnotations) {
+            if (target->declAnnotations.find(kv.first) == target->declAnnotations.end())
+                target->declAnnotations[kv.first] = kv.second;
         }
     };
 
@@ -1777,6 +1781,11 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
 {
     currentNode = ast;
 
+    // Ahead of the Event early-return below, so every kind of type declaration
+    // retains its annotations.  @cstruct keeps its own lowered form further
+    // down -- the VM consumes that directly when reconstructing FFI metadata.
+    recordDeclAnnotations(ast->name, ast->annotations, ast);
+
     if (ast->kind == TypeDecl::Event) {
         enterTypeScope(ast->name);
         asTypeScope(typeScope())->typeDecl = ast;
@@ -2683,6 +2692,29 @@ void RoxalCompiler::checkAnnotationArgs(const std::vector<ptr<ast::Annotation>>&
     }
 }
 
+void RoxalCompiler::recordDeclAnnotations(const ustring& name,
+                                          const std::vector<ptr<ast::Annotation>>& annotations,
+                                          const ptr<ast::AST>& location)
+{
+    if (annotations.empty())
+        return;
+    // Only top-level declarations: a local has no module slot to hang them off,
+    // and a nested type declaration's name is not a module name (its
+    // annotations are Phase-5 territory, along with type properties).
+    if (asFuncScope(funcScope())->scopeDepth != 0 || !(*scope())->isModule())
+        return;
+
+    // Same restriction the callable path applies -- the module cache can only
+    // round-trip the literal family writeAnnotation()/readAnnotation() handle.
+    checkAnnotationArgs(annotations, location);
+
+    // Assign rather than append: one declaration site owns the whole list, and
+    // a name compiled again (the REPL recompiles into the same module type)
+    // must not accumulate duplicates.
+    ObjModuleType* mod = asModuleType(asModuleScope(moduleScope())->moduleType);
+    mod->declAnnotations[name.hashCode()] = annotations;
+}
+
 std::any RoxalCompiler::visit(ptr<ast::FuncDecl> ast)
 {
     currentNode = ast;
@@ -2751,7 +2783,15 @@ std::any RoxalCompiler::visit(ptr<ast::FuncDecl> ast)
     // attached the FuncDecl annotations (which appear right before the func declaration)
     //  to the function object to make them available at runtime
     function->annotations = ast->annotations;
-    function->annotations.insert(function->annotations.end(), ast->func->annotations.begin(), ast->func->annotations.end());
+    // TypeDeducer::visit(FuncDecl) already propagates the declaration's
+    // annotations onto the Function node, so the two lists overlap by node
+    // identity.  Append only what is genuinely the Function's own (a docstring
+    // converted by the AST generator), or every annotation on a declared
+    // func/proc is reported twice by inspect.signatures()/members().
+    for (const auto& annot : ast->func->annotations)
+        if (std::find(function->annotations.begin(), function->annotations.end(), annot)
+                == function->annotations.end())
+            function->annotations.push_back(annot);
     checkAnnotationArgs(function->annotations, ast);
     for(const auto& annot : function->annotations) {
         if (annot->name == "doc") {
@@ -2834,6 +2874,17 @@ std::any RoxalCompiler::visit(ptr<ast::FuncDecl> ast)
 std::any RoxalCompiler::visit(ptr<ast::VarDecl> ast)
 {
     currentNode = ast;
+
+    // Retain the declaration's annotations before the branching below: this
+    // visit has four module-scope exits (declaring destructure, compile-time
+    // const, runtime const, plain var) and the annotations apply to all of them.
+    // A destructure declares several names, so each target records the list.
+    if (ast->targets.empty())
+        recordDeclAnnotations(ast->name, ast->annotations, ast);
+    else
+        for (const auto& target : ast->targets)
+            recordDeclAnnotations(target.name, ast->annotations, ast);
+
     auto emitInitializer = [&]() {
         if (ast->atHost.has_value()) {
             auto callAst = dynamic_ptr_cast<ast::Call>(ast->initializer.value());

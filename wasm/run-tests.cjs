@@ -191,6 +191,12 @@ if (!has('INSPECT')) gated.push(...parseList(py, 'inspect_tests'));
 const UNSUPPORTED = {
     inspect_roundtrip_corpus:
         'reads sibling sources through host-relative ../tests paths it builds itself',
+    dfdoc_palette:
+        'hands dfdoc.palette() the literal path ../modules/math.rox, which is a real '
+        + 'path from build/ natively but not here: the wasm image preloads modules at '
+        + '/stdlib (wasm/CMakeLists.txt), so /modules does not exist. Only the test '
+        + 'calls palette() by file path -- the editor passes module NAMES '
+        + "(PALETTE_MODULES in web/src/DfEditor.jsx), which resolve normally",
     repl_run:
         'drives the CLI REPL over stdin; the wasm host has no CLI',
     sys_paths:

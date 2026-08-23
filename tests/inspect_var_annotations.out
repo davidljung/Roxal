@@ -1,0 +1,13 @@
+var counter: ["@meta args=["a var"] named=["tag=v", "factor=-2.5"]"]
+const LIMIT: ["@meta args=["a const"] named=["limit=10"]"]
+var left: ["@meta args=["destructured"] named=[]"]
+var right: ["@meta args=["destructured"] named=[]"]
+type Widget: ["@meta args=["a type"] named=["arch=64"]"]
+var wide: ["@meta args=[2s, -7, 3, ["a", "b"], {"k": 1}] named=["flag=true", "none=nil"]"]
+func annotated_func: ["@meta args=["a func"] named=[]"]
+func holds_a_func: ["@meta args=["on the var, not the closure"] named=[]"]
+has meta=true has nope=false
+tag=v first=a var
+missing=nil
+pair annotations=[]
+2s is time=true

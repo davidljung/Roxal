@@ -1,0 +1,30 @@
+Test: annotation name passed ok
+Test: positional argument count passed ok
+Test: no named arguments passed ok
+Test: string argument passed ok
+Test: negated int argument folds to Int passed ok
+Test: real argument passed ok
+Test: bool argument passed ok
+Test: nil argument passed ok
+Test: bare name stays unresolved passed ok
+Test: no positional arguments passed ok
+Test: named argument count passed ok
+Test: named arguments keep source order passed ok
+Test: arg('x') passed ok
+Test: arg('y') passed ok
+Test: arg() of a missing name passed ok
+Test: suffixed kind passed ok
+Test: suffix text passed ok
+Test: suffixed literal passed ok
+Test: negated suffixed literal passed ok
+Test: list argument passed ok
+Test: list element passed ok
+Test: dict argument passed ok
+Test: dict key passed ok
+Test: nested list in dict passed ok
+Test: dict nested inside a list passed ok
+Test: innermost value passed ok
+Test: null annotations are skipped passed ok
+Test: list order passed ok
+Test: annotation with no arguments passed ok
+Passed 29 failed 0
