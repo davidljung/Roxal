@@ -1,0 +1,3 @@
+print('stdout')
+print('custom', channel='robot.telemetry')
+print('error-channel', flush=true, channel='stderr')

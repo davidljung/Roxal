@@ -1,0 +1,10 @@
+type OutputChannelActor actor:
+  func run() -> int:
+    print('custom-remote', channel='robot.log')
+    print('stderr-remote', flush=true, channel='stderr')
+    return 3
+
+var worker = OutputChannelActor() at "__COMPUTE_TEST_ADDR__"
+var result = worker.run()
+wait(for=result)
+print(result)

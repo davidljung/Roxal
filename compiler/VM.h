@@ -11,11 +11,13 @@
 #include <filesystem>
 
 #include "core/atomic.h"
+#include "core/Output.h"
 #include "Chunk.h"
 #include "Value.h"
 #include "CallFrame.h"
 #include "ArgsView.h"
 #include "ExecutionStatus.h"
+#include "OutputRoute.h"
 #include "Thread.h"
 #include "BuiltinModule.h"
 #include "LazyModuleRegistry.h"
@@ -567,16 +569,19 @@ public:
     // provenance on dataflow signals/nodes for introspection.
     struct SourceLocation { std::string name; size_t line = 0; size_t col = 0; };
     SourceLocation currentSourceLocation() const;
-#ifdef ROXAL_COMPUTE_SERVER
-    using PrintTarget = ActorInstance::MethodCallInfo::PrintTarget;
-    struct ScopedPrintTarget {
-        explicit ScopedPrintTarget(const PrintTarget& target);
-        ~ScopedPrintTarget();
-        PrintTarget previous;
+    struct ScopedOutputRoute {
+        explicit ScopedOutputRoute(const OutputRoute& route);
+        ~ScopedOutputRoute();
+        OutputRoute previous;
     };
-    static const PrintTarget& currentPrintTarget();
-    static void emitPrintOutput(const std::string& text, bool flush, bool here = false);
-#endif
+    static const OutputRoute& currentOutputRoute();
+    static void emitOutput(
+        const OutputEventView& event,
+        OutputDelivery delivery = OutputDelivery::FollowCallRoute);
+    static void emitDiagnostic(std::string_view text,
+                               OutputSeverity severity,
+                               std::string_view category,
+                               bool flush = true);
     static std::filesystem::path executablePath();
     static std::vector<std::string> defaultModuleSearchPaths();
     static void configureModulePaths(const std::vector<std::string>& modulePaths);
@@ -762,9 +767,7 @@ protected:
     static thread_local TimePoint nativeCallDeadline_;
     static thread_local ustring nativeCallContext_;
     static thread_local std::string nativeCallOverrun_; // set by callNativeFn() on overrun
-#ifdef ROXAL_COMPUTE_SERVER
-    static thread_local PrintTarget currentPrintTarget_;
-#endif
+    static thread_local OutputRoute currentOutputRoute_;
 
     // Dataflow thread flag: when true, module var reads return const refs
     // and module var writes raise a runtime error.

@@ -1,12 +1,12 @@
 #pragma once
 
-#include <iostream>
 #include <string>
 #include <memory>
 #include <sstream>
 
 
 #include <core/common.h>
+#include <core/Output.h>
 
 namespace roxal {
 
@@ -44,28 +44,52 @@ inline void compileError(const std::string& message)
         sscanf(pos.c_str(), "%d:%d", &line, &col);
     }
 
+    std::ostringstream rendered;
     if (line >= 0) {
         if (!compileSourceName.empty())
-            fprintf(stderr, "%s:%d:%d: error: %s\n",
-                    compileSourceName.c_str(), line, col, msg.c_str());
+            rendered << compileSourceName << ':' << line << ':' << col
+                     << ": error: " << msg;
         else
-            fprintf(stderr, "[line %d:%d]: error: %s\n", line, col, msg.c_str());
+            rendered << "[line " << line << ':' << col << "]: error: "
+                     << msg;
 
         if (compileSource() && !compileSourceName.empty()) {
             std::istringstream src(*compileSource());
             std::string srcLine;
             for (int i = 1; i <= line && std::getline(src, srcLine); ++i) {
                 if (i == line) {
-                    fprintf(stderr, "    %d | %s\n", line, srcLine.c_str());
-                    std::string lstr = std::to_string(line);
-                    size_t indent = 4 + lstr.length() + 1; // spaces before '|'
-                    fprintf(stderr, "%s| %s^\n", spaces(indent).c_str(), spaces(col).c_str());
+                    rendered << '\n'
+                             << renderOutputSourceExcerpt(
+                                    srcLine,
+                                    static_cast<std::uint32_t>(line),
+                                    static_cast<std::uint32_t>(col < 0 ? 0 : col));
                 }
             }
         }
     } else {
-        std::cerr << "Compile error: " << msg << std::endl;
+        rendered << "Compile error: " << msg;
     }
+
+    const std::string text = rendered.str();
+    OutputEventView event;
+    event.kind = OutputKind::Diagnostic;
+    event.severity = OutputSeverity::Error;
+    event.channel = "stderr";
+    event.category = "compiler";
+    event.text = text;
+    event.flush = true;
+    if (!compileSourceName.empty() && line > 0) {
+        event.source = OutputSourceLocationView {
+            compileSourceName,
+            static_cast<std::uint32_t>(line),
+            static_cast<std::uint32_t>(col < 0 ? 0 : col)
+        };
+        // In-memory source has already been rendered above. For file-only
+        // contexts, let the sink resolve and present the excerpt off-path.
+        if (!compileSource())
+            event.presentation = OutputPresentation::SourceExcerpt;
+    }
+    OutputRouter::emit(event);
 }
 
 } // namespace roxal

@@ -6,6 +6,7 @@
 #include "core/common.h"
 
 #include <optional>
+#include <sstream>
 
 #include <cstdlib>
 #include <stdexcept>
@@ -785,7 +786,8 @@ void DataflowEngine::tick(bool waitForTickStart)
         if (m_executionScheme == ExecutionScheme::Strict)
             throw std::runtime_error(message);
         else
-            std::cerr << message << std::endl;
+            roxal::VM::emitDiagnostic(message, roxal::OutputSeverity::Warning,
+                                      "dataflow");
     }
 
     m_tickNumber++;
@@ -846,16 +848,17 @@ void DataflowEngine::recordNodeOverrun(
         firstOccurrence = m_nodeOverrunWarned.insert(nodeName).second;
     }
 
-    // One stderr line per node, ever.  Printing from the ticking thread is
-    // itself slow, but this fires only on a cycle that already overran, and
-    // only the first time -- repeat offenders just bump the record for the
-    // host to drain.
+    // One event per node, ever; repeat offenders just bump the record for the
+    // host to drain. An RT embedding sink queues this without doing I/O here.
     if (firstOccurrence) {
-        std::cerr << "DataflowEngine: node '" << nodeName
-                  << "' overran the tick budget: cost " << cost.humanString()
-                  << ", " << overBudget.humanString()
-                  << " past the deadline (repeats aggregated; drain via "
-                     "consumeNodeOverruns())" << std::endl;
+        std::ostringstream message;
+        message << "DataflowEngine: node '" << nodeName
+                << "' overran the tick budget: cost " << cost.humanString()
+                << ", " << overBudget.humanString()
+                << " past the deadline (repeats aggregated; drain via "
+                   "consumeNodeOverruns())";
+        roxal::VM::emitDiagnostic(message.str(), roxal::OutputSeverity::Warning,
+                                  "dataflow");
     }
 }
 
@@ -901,15 +904,18 @@ void DataflowEngine::rtLintIslands()
         if (!m_rtLintAdvised.insert(scriptNodes).second)
             continue;
 
-        std::cerr << "DataflowEngine: advisory: periodic island (period "
-                  << island.tickPeriod.humanString()
-                  << ") on the host tick schedule contains script node(s) "
-                  << scriptNodes
-                  << " -- script execution is budget-sliced, but a single"
-                     " non-yieldable stretch can overrun the tick; if this"
-                     " work doesn't need the periodic schedule, move it to"
-                     " an event-driven or background island"
-                     " (ROXAL_RT_LINT=0 silences this)" << std::endl;
+        std::ostringstream message;
+        message << "DataflowEngine: advisory: periodic island (period "
+                << island.tickPeriod.humanString()
+                << ") on the host tick schedule contains script node(s) "
+                << scriptNodes
+                << " -- script execution is budget-sliced, but a single"
+                   " non-yieldable stretch can overrun the tick; if this"
+                   " work doesn't need the periodic schedule, move it to"
+                   " an event-driven or background island"
+                   " (ROXAL_RT_LINT=0 silences this)";
+        roxal::VM::emitDiagnostic(message.str(), roxal::OutputSeverity::Warning,
+                                  "dataflow");
     }
 }
 

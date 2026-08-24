@@ -1733,6 +1733,99 @@ Operations that can block the thread:
 Blocked threads yield at the deadline and resume when the blocking condition
 clears or time elapses.
 
+### Output events and embedding
+
+Language output and ordinary Roxal-owned diagnostics share the event model in
+`core/Output.h`. `print()` produces an event with `kind=Print` and
+`severity=None`; future logging builtins can use `kind=Log` and a severity
+without adding a second transport or sink interface. Diagnostic events use
+`kind=Diagnostic`. Kind and severity are intentionally independent so a log
+severity filter can never suppress an ordinary print record.
+
+An `OutputEventView` contains:
+
+- kind, severity, channel, category, text, and flush intent;
+- optional source name, 1-based line, and 0-based column; and
+- presentation flags, currently `SourceExcerpt`, which asks the terminal sink
+  to resolve the source text and add a caret when possible.
+
+The source request is best effort. Names may describe REPL/virtual source, a
+file that exists only on a remote peer, or a stale file. Failure to resolve the
+source never suppresses the event. `OutputEvent` is the owning counterpart for
+transports and asynchronous consumers; constructing it from a view copies all
+fields.
+
+Text framing is kind-specific. `Print` text is verbatim and already includes
+the script's `end` value. `Diagnostic` and `Log` text are complete records
+without a trailing newline; a terminal/file consumer supplies its record
+terminator. Embedded newlines inside a diagnostic (for example, a stack trace)
+remain part of the record.
+
+The VM is currently process-wide, so output has one process-wide primary sink:
+
+```cpp
+class HostOutputSink final : public roxal::OutputSink {
+public:
+    roxal::OutputResult emit(const roxal::OutputEventView& event) override;
+};
+
+HostOutputSink sink;
+roxal::OutputRouter::setSink(&sink);   // before setup/execution
+// ... stop all VM-owned work before destroying sink ...
+roxal::OutputRouter::setSink(nullptr); // restore the built-in console sink
+```
+
+The installed pointer is non-owning. Install it before execution, keep it alive
+through VM shutdown, and do not replace it while execution is active. A sink
+receives every channel and decides which channels go to a terminal, log file,
+telemetry stream, or nowhere. The view and all its string views are valid only
+for the duration of `emit()`; a sink retaining an event must copy it (or copy
+directly into its own fixed-capacity queue record).
+
+A sink must not synchronously call back into `OutputRouter` or Roxal code that
+can emit another event. Such re-entry would recursively invoke the same sink
+and may deadlock a sink's own serialization/queue lock.
+
+`emit()` may be called concurrently from the host `runFor()` thread, actor
+threads, compute-reader threads, and module workers. A sink used by a real-time
+host must therefore be bounded and non-blocking and must perform no terminal,
+file, or network I/O. The intended Future Controller pattern is an MPSC queue
+whose low-priority non-RT consumer performs the actual output. The queue must
+linearize complete accepted events; calls that do not overlap retain their
+happens-before order, while overlapping calls may take either order. A rejected
+event returns `Dropped`; the router never retries it through blocking stderr and
+increments the counter returned by `consumeDroppedCount()`. Sink exceptions are
+contained and counted as drops as well. An embedding host that can reject
+records is responsible for polling that counter and reporting it through a
+path independent of the sink that dropped them.
+
+The output dispatch itself is an atomic pointer load and one virtual call, but
+this is not an allocation-free language-execution guarantee: evaluating a
+Roxal expression and converting a value to the string consumed by `print()` may
+allocate in the normal VM heap. The RT contract here is bounded, non-blocking
+sink dispatch with no producer-side terminal/file/network I/O.
+
+`flush=true` is an urgency and record-boundary request, not permission to block
+an RT producer until physical I/O completes. The default console sink writes
+and flushes before returning. An asynchronous sink must keep an accepted record
+whole, preserve its queue order, and make a flushed record visible to its target
+promptly. This prevents fragments from separate print calls interleaving while
+leaving the exact cross-thread order of simultaneous calls unspecified.
+
+With no custom sink, the built-in console sink preserves standalone behavior:
+it serializes each complete event under one mutex, sends the `stderr` channel to
+stderr, sends stdout and custom channels to stdout, and honors flush. It uses
+the C `FILE*` streams so worker-thread diagnostics remain visible on wasm. It
+also performs requested source-file lookup/caret rendering before taking the
+output serialization mutex. Consequently it is not an RT sink and an RT
+embedding must install its own sink before calling `runFor()`.
+
+Roxal deliberately does not create an output worker thread. If a core async
+sink is added later, its worker must explicitly undo any scheduling inherited
+from the creating RT thread (on Linux, select `SCHED_OTHER` with priority zero)
+and observe the host's configured RT-core exclusion, following the actor and GC
+worker precedents.
+
 
 ## Garbage Collection & Thread Coordination
 
@@ -2506,7 +2599,7 @@ messages:
 - `HELLO` / `HELLO_OK` / `HELLO_ERR`
 - `SPAWN_ACTOR` / `SPAWN_RESULT`
 - `CALL_METHOD` / `CALL_RESULT`
-- `PRINT_OUTPUT`
+- `OUTPUT_EVENT`
 - `ACTOR_DROPPED`
 - `BYE`
 
@@ -2515,7 +2608,7 @@ Outgoing RPC-like requests are tracked by `call_id` in a pending-call table.
 Each pending entry stores:
 
 - a `std::promise<Value>` used to complete the local wait
-- print-routing metadata for Phase 8 output forwarding
+- the output route captured from the calling context
 
 This means the transport is synchronous per network hop internally (the helper
 thread blocks on the promise/future pair), while still exposing the normal
@@ -2608,26 +2701,39 @@ This is intentionally the simple freshness model: one canonical "current"
 definition per module export symbol. It fixes the dev-time stale-type problem
 without yet implementing multi-version coexistence on one server.
 
-### Print Redirection
+### Output Event Routing
 
-Remote print routing is call-scoped rather than process-scoped.
+Remote output routing is call-scoped rather than process-scoped.
 
-Each in-flight remote call carries a print target:
+Each in-flight remote call carries an output route:
 
-- local stdout, or
+- the local process sink, or
 - an upstream `(ComputeConnection, call_id)` pair
 
-`sys.print(value='', end='\n', flush=false, here=false)` uses that target:
+`sys.print(value='', end='\n', flush=false, here=false, channel='stdout')`
+uses that route:
 
 - with `here=false`, output is routed back to the originating caller if the
-  current call came from a remote peer; otherwise it prints locally
-- with `here=true`, output always goes to the local process's stdout
+  current call came from a remote peer; otherwise it reaches the local sink
+- with `here=true`, output always goes to the local process sink
 
-`PRINT_OUTPUT` frames are forwarded transitively, so if `A -> B -> C` and code
-running on `C` calls `print()`, the output is forwarded from `C` to `B` to `A`.
+`OUTPUT_EVENT` frames carry the full envelope (including channel, category,
+severity, flush intent, and optional source presentation metadata) and are
+forwarded transitively. If `A -> B -> C` and code running on `C` calls
+`print()`, the output is forwarded from `C` to `B` to `A`.
 Local actor-to-actor calls made while servicing a remote call inherit the same
-print target, so nested local calls on the server also print back to the
+output route, so nested local calls on the server also print back to the
 originating client by default.
+
+Delivery policy is separate from event kind. Ordinary `print()` follows the
+call route unless `here=true` selects the local sink. Diagnostics are teed: the
+machine that raised one submits a local copy for its operator and forwards the
+original event to the originating caller. Compute servers receive executable
+Chunks and Values, not the client's `.rox` files, so the server-local copy has
+the `SourceExcerpt` presentation request cleared. The forwarded copy retains
+it, allowing the originating client's sink to resolve the client-owned source
+file and render the line/caret. Intermediate servers in a chained call only
+forward the event.
 
 ### Lifetime Model
 

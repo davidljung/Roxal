@@ -740,7 +740,9 @@ void FuncNode::invokeExecutionCallbacks(TimePoint time, const Values& inputValue
         try {
             callback(time, ptr_from_this(), inputValues, outputValues);
         } catch(const std::exception& e) {
-            std::cerr << "Exception in funcnode "+name()+" callback " << e.what() << std::endl;
+            roxal::VM::emitDiagnostic(
+                "Exception in funcnode " + name() + " callback " + e.what(),
+                roxal::OutputSeverity::Error, "dataflow.callback");
         }
         #else
         try { callback(time, ptr_from_this(), inputValues, outputValues); } catch(...) {}

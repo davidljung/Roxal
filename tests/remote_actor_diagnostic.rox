@@ -1,0 +1,8 @@
+type RemoteDiagnosticActor actor:
+  func fail() -> int:
+    var values = [1]
+    return values[9]
+
+var worker = RemoteDiagnosticActor() at "__COMPUTE_TEST_ADDR__"
+var result = worker.fail()
+wait(for=result)

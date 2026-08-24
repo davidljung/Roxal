@@ -1,6 +1,7 @@
 #ifdef ROXAL_ENABLE_GRPC
 
 #include "ProtoAdapter.h"
+#include "VM.h"
 
 #include <google/protobuf/text_format.h>
 #include <google/protobuf/io/coded_stream.h>
@@ -24,13 +25,16 @@ public:
         std::string errorMsg = "Error in " + filename + " at line " +
                                std::to_string(line) + " and column " +
                                std::to_string(column) + ": " + message;
-        std::cerr << errorMsg << std::endl;
+        roxal::VM::emitDiagnostic(errorMsg, roxal::OutputSeverity::Error,
+                                  "grpc.proto");
     }
 
     void AddWarning(const std::string& filename, int line, int column,
                     const std::string& message) override {
-        std::cerr << "warning " << filename << " " << line << " " << column << " "
-                  << message << std::endl;
+        roxal::VM::emitDiagnostic(
+            "warning " + filename + " " + std::to_string(line) + " " +
+                std::to_string(column) + " " + message,
+            roxal::OutputSeverity::Warning, "grpc.proto");
     }
 };
 
@@ -541,7 +545,8 @@ Value ProtoAdapter::generateRoxalResponse(const std::string& methodName, const s
     std::unique_ptr<Message> msg(m_dynfactory->GetPrototype(desc)->New());
 
     if(!msg->ParseFromArray(response.data(), static_cast<int>(response.size()))) {
-        std::cerr << "Could not parse response for method " << methodName << std::endl;
+        VM::emitDiagnostic("Could not parse response for method " + methodName,
+                           OutputSeverity::Error, "grpc.response");
         return Value::nilVal();
     }
 
@@ -634,7 +639,10 @@ void ProtoAdapter::buildRespField(const Message& msg, const FieldDescriptor* fie
         {
             Value declVal = declForFullName(field->message_type()->full_name());
             if (declVal.isNil()) {
-                std::cerr << "DEBUG: declForFullName returned nil for: " << field->message_type()->full_name() << std::endl;
+                VM::emitDiagnostic(
+                    "DEBUG: declForFullName returned nil for: " +
+                        field->message_type()->full_name(),
+                    OutputSeverity::Debug, "grpc.response");
                 roxField.assign(Value::nilVal());
                 break;
             }
@@ -647,7 +655,8 @@ void ProtoAdapter::buildRespField(const Message& msg, const FieldDescriptor* fie
 
         default:
         {
-            std::cout << "Undefined message type for field " << field->name() << std::endl;
+            VM::emitDiagnostic("Undefined message type for field " + field->name(),
+                               OutputSeverity::Error, "grpc.response");
             roxField.assign(Value::nilVal());
         }
         break;
@@ -747,7 +756,10 @@ void ProtoAdapter::buildRepeatedRespField(const Message& msg, const FieldDescrip
 
         default:
         {
-            std::cout << "Undefined message type " << field->cpp_type() << " for repeated field " << field->name() << std::endl;
+            VM::emitDiagnostic(
+                "Undefined message type " + std::to_string(field->cpp_type()) +
+                    " for repeated field " + field->name(),
+                OutputSeverity::Error, "grpc.response");
             list->append(Value::nilVal());
         }
         break;
@@ -821,7 +833,7 @@ Value ProtoAdapter::declForFullName(const std::string& fullName) const
 
 void ProtoAdapter::logError(const std::string& errormsg) const
 {
-    std::cerr << errormsg << std::endl;
+    VM::emitDiagnostic(errormsg, OutputSeverity::Error, "grpc");
 }
 
 void ProtoAdapter::clearDecls()

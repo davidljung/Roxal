@@ -10,11 +10,10 @@
 #include <utility>
 #include <vector>
 
-#ifdef DEBUG_BUILD
-#include <iostream>
-#endif
-
 #include "core/memory.h"
+#ifdef DEBUG_BUILD
+#include "core/Output.h"
+#endif
 
 //
 // CallbackRegistry -- a removable, thread-safe callback list.
@@ -316,7 +315,16 @@ public:
             }
             #ifdef DEBUG_BUILD
             catch (const std::exception& e) {
-                std::cerr << "Exception in callback: " << e.what() << std::endl;
+                const std::string message =
+                    std::string("Exception in callback: ") + e.what();
+                OutputEventView event;
+                event.kind = OutputKind::Diagnostic;
+                event.severity = OutputSeverity::Error;
+                event.channel = "stderr";
+                event.category = "callback";
+                event.text = message;
+                event.flush = true;
+                OutputRouter::emit(event);
             }
             #endif
             catch (...) {}

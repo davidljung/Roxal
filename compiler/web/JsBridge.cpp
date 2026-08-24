@@ -468,9 +468,12 @@ void drainInbound()
                     break;
             }
         } catch (const std::exception& e) {
-            std::cerr << "web: inbound work failed: " << e.what() << std::endl;
+            VM::emitDiagnostic(
+                std::string("web: inbound work failed: ") + e.what(),
+                OutputSeverity::Error, "web.bridge");
         } catch (...) {
-            std::cerr << "web: inbound work failed" << std::endl;
+            VM::emitDiagnostic("web: inbound work failed",
+                               OutputSeverity::Error, "web.bridge");
         }
     }
 }
@@ -513,7 +516,9 @@ size_t drainInboundOnly(Inbound kind)
                     break;   // only side-effect-free kinds are safe here
             }
         } catch (const std::exception& e) {
-            std::cerr << "web: inbound (filtered) failed: " << e.what() << std::endl;
+            VM::emitDiagnostic(
+                std::string("web: inbound (filtered) failed: ") + e.what(),
+                OutputSeverity::Error, "web.bridge");
         } catch (...) {}
     }
     return matched.size();

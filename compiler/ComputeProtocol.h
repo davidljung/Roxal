@@ -4,7 +4,11 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
+
+#include <core/Output.h>
 
 namespace roxal {
 
@@ -12,10 +16,12 @@ namespace roxal {
 // Keep this independent from the module cache version because the wire shape
 // can evolve without changing .roc serialization.
 constexpr char ComputeMagic[4] = {'R', 'X', 'C', 'S'};
+// 40: PrintOutput became a general OutputEvent envelope carrying kind,
+// severity, channel/category, presentation hints, and source location.
 // 39: ObjModuleType's record grew declAnnotations; the wire ships Values
 // through the same writeValue()/readValue() as the .roc, so peers of different
 // versions would misparse a serialized function's embedded module type.
-constexpr std::uint32_t ComputeVersion = 39;
+constexpr std::uint32_t ComputeVersion = 40;
 
 // Default listen port for `roxal --server`
 constexpr std::uint16_t ComputeDefaultPort = 26925;
@@ -33,7 +39,7 @@ enum class ComputeMsg : std::uint8_t {
     SpawnResult  = 0x11,  // server→client: call_id(8) + ok(1) + actor_id(8) | error string
     CallMethod   = 0x20,  // either dir:   call_id(8) + actor_id(8) + method_name_len(4) + method_name + serialized args
     CallResult   = 0x21,  // either dir:   call_id(8) + ok(1) + serialized result | error string
-    PrintOutput  = 0x22,  // either dir:   call_id(8) + flush(1) + text string
+    OutputEvent  = 0x22,  // either dir:   call_id(8) + output-event envelope
     ActorDropped = 0x30,  // either dir:   actor_id(8)
     Bye          = 0xFF,  // either dir:   clean shutdown
 };
@@ -83,7 +89,7 @@ inline void writeBytes(std::vector<std::uint8_t>& buf,
 }
 
 // Append a length-prefixed string (uint32_t length + UTF-8 bytes)
-inline void writeString(std::vector<std::uint8_t>& buf, const std::string& s) {
+inline void writeString(std::vector<std::uint8_t>& buf, std::string_view s) {
     writeU32(buf, static_cast<std::uint32_t>(s.size()));
     writeBytes(buf, s.data(), s.size());
 }
@@ -125,6 +131,59 @@ inline std::string readString(const std::uint8_t*& p, const std::uint8_t* end) {
     std::string s(reinterpret_cast<const char*>(p), len);
     p += len;
     return s;
+}
+
+inline void writeOutputEvent(std::vector<std::uint8_t>& buf,
+                             const OutputEventView& event) {
+    writeU8(buf, static_cast<std::uint8_t>(event.kind));
+    writeU8(buf, static_cast<std::uint8_t>(event.severity));
+    writeU8(buf, event.flush ? 1 : 0);
+    writeU8(buf, static_cast<std::uint8_t>(event.presentation));
+    writeString(buf, event.channel);
+    writeString(buf, event.category);
+    writeString(buf, event.text);
+    writeU8(buf, event.source ? 1 : 0);
+    if (event.source) {
+        writeString(buf, event.source->sourceName);
+        writeU32(buf, event.source->line);
+        writeU32(buf, event.source->column);
+    }
+}
+
+inline OutputEvent readOutputEvent(const std::uint8_t*& p,
+                                   const std::uint8_t* end) {
+    const std::uint8_t kind = readU8(p, end);
+    const std::uint8_t severity = readU8(p, end);
+    const std::uint8_t flush = readU8(p, end);
+    const std::uint8_t presentation = readU8(p, end);
+    if (kind > static_cast<std::uint8_t>(OutputKind::Diagnostic) ||
+        severity > static_cast<std::uint8_t>(OutputSeverity::Critical) ||
+        flush > 1 ||
+        (presentation & ~static_cast<std::uint8_t>(OutputPresentation::SourceExcerpt)) != 0) {
+        throw std::runtime_error("ComputeProtocol: invalid output-event metadata");
+    }
+
+    OutputEvent event;
+    event.kind = static_cast<OutputKind>(kind);
+    event.severity = static_cast<OutputSeverity>(severity);
+    event.flush = flush != 0;
+    event.presentation = static_cast<OutputPresentation>(presentation);
+    event.channel = readString(p, end);
+    if (event.channel.empty() || event.channel.size() > OutputChannelMaxBytes)
+        throw std::runtime_error("ComputeProtocol: invalid output-event channel");
+    event.category = readString(p, end);
+    event.text = readString(p, end);
+    const std::uint8_t hasSource = readU8(p, end);
+    if (hasSource > 1)
+        throw std::runtime_error("ComputeProtocol: invalid output-event source flag");
+    if (hasSource != 0) {
+        OutputSourceLocation source;
+        source.sourceName = readString(p, end);
+        source.line = readU32(p, end);
+        source.column = readU32(p, end);
+        event.source = std::move(source);
+    }
+    return event;
 }
 
 

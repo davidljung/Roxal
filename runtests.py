@@ -304,7 +304,8 @@ tests = [
     'fileio_sync', 'fileio_async_param', 'fileio_list_dir',
     'string_concat_roundtrip', 'actor_concat_stress',
     'help_doc', 'help_wait', 'help_time_wall_now', 'help_time_wall_now_instance', 'docstring_func',
-    'builtin_object_methods', 'math_counter_signal', 'print_flush', 'sys_paths',
+    'builtin_object_methods', 'math_counter_signal', 'print_flush', 'print_channels',
+    'print_channel_invalid', 'sys_paths',
     'sys_platform', 'sys_defined',
     'grpc_message_types', 'grpc_service_actor', 'grpc_int64_values', 'grpc_runtime_error', 'grpc_streaming', 'grpc_args',
     'rt_execution',
@@ -467,9 +468,13 @@ compute_server_tests = [
     'remote_actor_tensor',
     'remote_actor_refresh_here',
     'remote_actor_print',
+    'remote_actor_output_channels',
     'remote_actor_print_forwarded',
     'remote_actor_print_here',
     'remote_actor_version_mismatch',
+    # Keep last: it deliberately raises a fatal VM runtime error on the shared
+    # compute test server after verifying diagnostic tee/source presentation.
+    'remote_actor_diagnostic',
 ]
 compute_server_double_hop_tests = ['remote_actor_forwarded_type', 'remote_actor_print_forwarded']
 
@@ -1186,8 +1191,8 @@ try:
                 print()
                 passed = False
         server_out_path = os.path.join(test_dir, test + '.server.out')
-        if os.path.exists(server_out_path):
-            expected_server = open(server_out_path, 'rb').read()
+        server_err_path = os.path.join(test_dir, test + '.server.err')
+        if os.path.exists(server_out_path) or os.path.exists(server_err_path):
             actual_chunks = []
             if compute_server_log and compute_server_log.name in compute_server_offsets:
                 _, chunk = read_new_server_output(compute_server_log, compute_server_offsets[compute_server_log.name])
@@ -1196,12 +1201,25 @@ try:
                 _, chunk = read_new_server_output(compute_server_log_2, compute_server_offsets[compute_server_log_2.name])
                 actual_chunks.append(chunk)
             actual_server = b''.join(actual_chunks)
-            if expected_server != actual_server:
+            if os.path.exists(server_out_path):
+                expected_server = open(server_out_path, 'rb').read()
+                server_matches = expected_server == actual_server
+            else:
+                with open(server_err_path, 'r') as file:
+                    server_re = file.read().strip()
+                server_matches = re.search(
+                    server_re, actual_server.decode(errors='replace'),
+                    re.MULTILINE | re.DOTALL) is not None
+            if not server_matches:
                 print(f"FAIL: {opt_expected}", flush=True)
                 print("-- compute server stdout --")
                 print(actual_server)
-                print("-- expected compute server stdout --")
-                print(expected_server)
+                if os.path.exists(server_out_path):
+                    print("-- expected compute server stdout --")
+                    print(expected_server)
+                else:
+                    print("-- expected compute server regex --")
+                    print(server_re)
                 print("--")
                 print()
                 passed = False

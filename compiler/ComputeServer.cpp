@@ -743,8 +743,7 @@ void ComputeServer::handleClient(int clientFd)
                 CallSpec initCallSpec = decodeCallSpecBytes(p, end);
                 initArgs = deserializeValueListForServer(p, end, ctx);
                 gcParticipant.pollSafepointIfRequested();
-                VM::ScopedPrintTarget printTargetScope(
-                        ActorInstance::MethodCallInfo::PrintTarget::remoteCall(conn, callId));
+                VM::ScopedOutputRoute outputRouteScope(OutputRoute::remoteCall(conn, callId));
                 actorVal = spawnActorForServer(actorTypeVal, initArgs, initCallSpec);
                 int64_t actorId = actors.addActor(actorVal);
                 gcParticipant.pollSafepointIfRequested();
@@ -802,8 +801,7 @@ void ComputeServer::handleClient(int clientFd)
                     workerReadyPromise.set_value();
                     try {
                         Value* argTop = args.empty() ? nullptr : args.data() + args.size();
-                        VM::ScopedPrintTarget printTargetScope(
-                                ActorInstance::MethodCallInfo::PrintTarget::remoteCall(conn, callId));
+                        VM::ScopedOutputRoute outputRouteScope(OutputRoute::remoteCall(conn, callId));
                         workerParticipant.pollSafepointIfRequested();
                         completion = asActorInstance(actorVal)->queueCall(
                                 callee, callSpec, argTop, /*forceCompletionFuture=*/true);
@@ -857,11 +855,10 @@ void ComputeServer::handleClient(int clientFd)
                 break;
             }
 
-            case ComputeMsg::PrintOutput: {
+            case ComputeMsg::OutputEvent: {
                 uint64_t callId = readU64(p, end);
-                bool flush = readU8(p, end) != 0;
-                std::string text = readString(p, end);
-                conn->deliverPrintOutput(callId, text, flush);
+                OutputEvent event = readOutputEvent(p, end);
+                conn->deliverOutputEvent(callId, event.view());
                 break;
             }
 

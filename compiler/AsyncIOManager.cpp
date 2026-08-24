@@ -1,5 +1,6 @@
 #include "AsyncIOManager.h"
 #include "SimpleMarkSweepGC.h"
+#include "VM.h"
 #include <optional>
 #include "Object.h"
 
@@ -289,20 +290,29 @@ void AsyncIOManager::workerLoop()
             } catch (const std::exception& e) {
                 // A failed async op must not be silent: report it, and
                 // resolve the future to a script-observable failure value.
-                std::cerr << "fileio: async " << opTypeName(op.type)
-                          << (op.path.empty() ? std::string() : " '" + op.path + "'")
-                          << " failed: " << e.what() << std::endl;
+                std::ostringstream message;
+                message << "fileio: async " << opTypeName(op.type)
+                        << (op.path.empty() ? std::string() : " '" + op.path + "'")
+                        << " failed: " << e.what();
+                VM::emitDiagnostic(message.str(), OutputSeverity::Error,
+                                   "fileio");
                 op.promise->set_value(opFailureValue(op.type));
             } catch (...) {
-                std::cerr << "fileio: async " << opTypeName(op.type)
-                          << " failed with unknown error" << std::endl;
+                VM::emitDiagnostic(
+                    std::string("fileio: async ") + opTypeName(op.type) +
+                        " failed with unknown error",
+                    OutputSeverity::Error, "fileio");
                 op.promise->set_value(opFailureValue(op.type));
             }
         }
         if (abandoned) {
-            std::cerr << "fileio: " << abandoned << " pending op(s) abandoned at shutdown, "
-                      << abandonedBytes << " bytes unwritten (wait on close()'s"
-                      << " future to guarantee completion)" << std::endl;
+            std::ostringstream message;
+            message << "fileio: " << abandoned
+                    << " pending op(s) abandoned at shutdown, "
+                    << abandonedBytes << " bytes unwritten (wait on close()'s"
+                    << " future to guarantee completion)";
+            VM::emitDiagnostic(message.str(), OutputSeverity::Warning,
+                               "fileio");
         }
 
         {
@@ -315,8 +325,10 @@ void AsyncIOManager::workerLoop()
     // no future is left holding a broken promise.
     std::lock_guard<std::mutex> lock(queueMutex);
     if (!pendingOps.empty()) {
-        std::cerr << "fileio: " << pendingOps.size()
-                  << " op(s) abandoned at shutdown" << std::endl;
+        VM::emitDiagnostic(
+            "fileio: " + std::to_string(pendingOps.size()) +
+                " op(s) abandoned at shutdown",
+            OutputSeverity::Warning, "fileio");
         for (auto& op : pendingOps)
             op.promise->set_value(opFailureValue(op.type));
         pendingOps.clear();
@@ -421,16 +433,20 @@ Value AsyncIOManager::executeFileWrite(PendingIOOp& op)
 
     std::lock_guard<std::mutex> lock(op.file->mutex);
     if (!op.file->file || !op.file->file->is_open()) {
-        std::cerr << "fileio: async write dropped -- file already closed ("
-                  << op.writeData.size() << " bytes)" << std::endl;
+        VM::emitDiagnostic(
+            "fileio: async write dropped -- file already closed (" +
+                std::to_string(op.writeData.size()) + " bytes)",
+            OutputSeverity::Error, "fileio");
         return Value::falseVal();
     }
 
     op.file->file->write(op.writeData.data(),
                          static_cast<std::streamsize>(op.writeData.size()));
     if (!op.file->file->good()) {
-        std::cerr << "fileio: async write failed ("
-                  << op.writeData.size() << " bytes)" << std::endl;
+        VM::emitDiagnostic(
+            "fileio: async write failed (" +
+                std::to_string(op.writeData.size()) + " bytes)",
+            OutputSeverity::Error, "fileio");
         return Value::falseVal();
     }
 

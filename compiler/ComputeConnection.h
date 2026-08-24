@@ -3,6 +3,7 @@
 #ifdef ROXAL_COMPUTE_SERVER
 
 #include <core/common.h>
+#include <core/Output.h>
 #include <compiler/Value.h>
 #include <compiler/Object.h>
 #include <compiler/CallableInfo.h>
@@ -57,7 +58,6 @@ struct NetworkSerializationContext : public SerializationContext {
 // -----------------------------------------------------------------------
 class ComputeConnection : public std::enable_shared_from_this<ComputeConnection> {
 public:
-    using PrintTarget = ActorInstance::MethodCallInfo::PrintTarget;
 
     // Client side: connect to "host:port"
     static ptr<ComputeConnection> connect(const std::string& hostPort);
@@ -88,7 +88,7 @@ public:
     void unregisterLocalActor(int64_t id);
     Value resolveLocalActor(int64_t id);
     void sendActorDropped(int64_t actorId);
-    void sendPrintOutput(uint64_t callId, const std::string& text, bool flush);
+    void sendOutputEvent(uint64_t callId, const OutputEventView& event);
 
     // Send a BYE frame and close the connection gracefully.
     void sendBye();
@@ -114,7 +114,7 @@ public:
     // Public so server-side code can resolve back-channel CALL_RESULT frames.
     void resolveCall(uint64_t callId, Value result);
     void rejectCall(uint64_t callId, const std::string& errorMsg);
-    void deliverPrintOutput(uint64_t callId, const std::string& text, bool flush);
+    void deliverOutputEvent(uint64_t callId, const OutputEventView& event);
 
     // Handle an incoming CALL_METHOD for a locally-registered actor.
     // Public so server-side code can delegate back-channel calls.
@@ -126,7 +126,7 @@ public:
 private:
     struct PendingCall {
         ptr<std::promise<Value>> promise;
-        PrintTarget printTarget;
+        OutputRoute outputRoute;
         // Optional GC-rooted slot: when non-null, resolveCall writes the
         // result here *before* signalling the promise.  This ensures the
         // Value is reachable from a GC root (the caller's traced state)

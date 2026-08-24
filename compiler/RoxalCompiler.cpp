@@ -7019,7 +7019,10 @@ void RoxalCompiler::emitBytes(OpCode op, uint8_t byte2, uint8_t byte3, const std
 {
     #ifdef DEBUG_BUILD
     if (!isDoubleByte(op))
-        std::cerr << "Warning: Emitting single-byte opcode " << int(op) << " with double-byte argument." << std::endl;
+        VM::emitDiagnostic(
+            "Warning: Emitting single-byte opcode " + std::to_string(int(op)) +
+                " with double-byte argument.",
+            OutputSeverity::Warning, "compiler.bytecode");
     #endif
     currentChunk()->write(op, currentNode->interval.first.line,
                           currentNode->interval.first.pos, comment);

@@ -1,6 +1,7 @@
 type HerePrintWorkerActor actor:
   func run() -> int:
     print("server-only", flush=true, here=true)
+    print("server-custom", flush=true, here=true, channel="robot.local")
     print("routed")
     return 9
 

@@ -1810,7 +1810,7 @@ Useful options:
 * `--server` start server mode instead of running a script
 * `--port N` listen on port `N` (default `26925`)
 
-The server hosts actor instances and executes remote method calls. `print()` output from those calls is routed back to the originating client by default unless `here=true` is used.
+The server hosts actor instances and executes remote method calls. `print()` output from those calls is routed back to the originating client by default unless `here=true` is used. The selected output `channel` is preserved across the connection.
 
 For example, on a remote machine (say, 192.168.1.10):
 ```bash
@@ -1835,7 +1835,7 @@ $ roxal remote-example.rox
 Hello Client
 ```
 
-While the `sayHi()` method executed on the remote machine, the output was routed back to the client terminal.  (`sys.print()` also accepts a `here=true` param to cause output wherever the actor is running instead - the remote machine in this case)
+While the `sayHi()` method executed on the remote machine, the output was routed back to the client. (`sys.print()` also accepts a `here=true` parameter to send the output to the actor host's local output sink instead.)
 
 Note that actor instances can be passed to actor methods as args to allow remote actors to make method calls to instances on other remote machines or whereever they were instantiated and are running (e.g. on the original client)
 
@@ -2748,7 +2748,7 @@ The functions in the sys module are always globally available (- as if `import s
 * `realtime` - `true` only when the embedding host runs the VM under a real-time scheduler. This is declared by the host (via `VM::setRealtimeHost(true)` before VM construction), not detected (const)
 
 #### Functions
-* `print(value='')` - print the string representation of `value` followed by a newline
+* `print(value='', end='\n', flush=false, here=false, channel='stdout')` - send the string representation of `value` plus `end` to an output channel. `stdout` and `stderr` are built in; applications embedding Roxal may define additional nonempty channel names of up to 128 UTF-8 bytes. In the standalone CLI, custom channels are written to stdout. `flush=true` requests prompt delivery of the complete print record. During a remote actor call, output returns to the originating caller by default; `here=true` sends it to the actor host's local output sink instead.
 * `len(v)` - return the length of `v` if applicable
 * `help(fn)` - return signature and doc string for `fn`
 * `clone(v)` - deep copy `v`

@@ -2,6 +2,7 @@
 
 #include "ClientCall.h"
 #include "SimpleMarkSweepGC.h"
+#include "VM.h"
 #include <stdexcept>
 #include <chrono>
 #include <iostream>
@@ -226,8 +227,10 @@ void ClientCall::ServerReadLoop(std::shared_ptr<StreamHandle> handle)
             try {
                 handle->onServerMessage(message);
             } catch (const std::exception& e) {
-                std::cerr << "gRPC stream reader: stopping after message callback "
-                             "threw: " << e.what() << std::endl;
+                roxal::VM::emitDiagnostic(
+                    std::string("gRPC stream reader: stopping after message "
+                                "callback threw: ") + e.what(),
+                    roxal::OutputSeverity::Error, "grpc.stream");
                 handle->serverDone = true;
                 break;
             }

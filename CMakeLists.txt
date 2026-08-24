@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
 
-project(roxal VERSION 0.8.38 LANGUAGES CXX C)
+project(roxal VERSION 0.8.39 LANGUAGES CXX C)
 set(ROXAL_PRERELEASE "pre" CACHE STRING "SemVer prerelease label (e.g. alpha.1, rc.1)")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -436,6 +436,7 @@ set(CORE_SOURCES
     core/AST.cpp
     core/atomic.cpp
     core/common.cpp
+    core/Output.cpp
     core/types.cpp
     core/json5.cpp
 )
@@ -725,9 +726,17 @@ add_test(NAME RoxalUString COMMAND roxal_ustring_test)
 
 # Subscribe/cancel/drain contract of the shared callback registry (df::Signal
 # change callbacks, DataflowEngine tick callbacks, bare property observers).
-add_executable(roxal_callback_registry_test core/CallbackRegistry_test.cpp)
+add_executable(roxal_callback_registry_test
+    core/CallbackRegistry_test.cpp
+    core/Output.cpp)
 target_link_libraries(roxal_callback_registry_test PRIVATE roxal_abi pthread)
 add_test(NAME RoxalCallbackRegistry COMMAND roxal_callback_registry_test)
+
+# Output event/view fidelity, sink rejection containment, and the standalone
+# console sink's compatibility behavior.
+add_executable(roxal_output_test core/Output_test.cpp core/Output.cpp)
+target_link_libraries(roxal_output_test PRIVATE roxal_abi pthread)
+add_test(NAME RoxalOutput COMMAND roxal_output_test)
 
 # Build the static library containing the core compiler and VM
 add_library(roxalcore STATIC ${CORE_SOURCES} ${COMPILER_SOURCES} ${GENERATED_SOURCES})

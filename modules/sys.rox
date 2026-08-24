@@ -1,6 +1,6 @@
 @builtin
-proc print(value:string='', end='\n', flush:bool=false, here:bool=false):
-  """print the string representation of value followed by end, optionally flush, and with here=true force output on the current process instead of routed remote output"""
+proc print(value:string='', end='\n', flush:bool=false, here:bool=false, channel:string='stdout'):
+  """send the string representation of value followed by end to an output channel; flush requests prompt delivery and here forces output on the current process instead of following a remote call route"""
 
 @builtin
 func len(v) -> int:

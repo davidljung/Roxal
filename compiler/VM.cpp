@@ -101,9 +101,7 @@ thread_local TimePoint VM::nativeCallDeadline_ { TimePoint::max() };
 thread_local ustring VM::nativeCallContext_;
 thread_local std::string VM::nativeCallOverrun_;
 thread_local bool VM::onDataflowThread_ { false };
-#ifdef ROXAL_COMPUTE_SERVER
-thread_local VM::PrintTarget VM::currentPrintTarget_ {};
-#endif
+thread_local OutputRoute VM::currentOutputRoute_ {};
 
 std::string VM::consumeNativeCallOverrun()
 {
@@ -381,43 +379,68 @@ std::string VM::featureString()
     return out.str();
 }
 
+VM::ScopedOutputRoute::ScopedOutputRoute(const OutputRoute& route)
+    : previous(currentOutputRoute_)
+{
+    currentOutputRoute_ = route;
+}
+
+VM::ScopedOutputRoute::~ScopedOutputRoute()
+{
+    currentOutputRoute_ = previous;
+}
+
+const OutputRoute& VM::currentOutputRoute()
+{
+    return currentOutputRoute_;
+}
+
+void VM::emitOutput(const OutputEventView& event, OutputDelivery delivery)
+{
 #ifdef ROXAL_COMPUTE_SERVER
-VM::ScopedPrintTarget::ScopedPrintTarget(const PrintTarget& target)
-    : previous(currentPrintTarget_)
-{
-    currentPrintTarget_ = target;
-}
-
-VM::ScopedPrintTarget::~ScopedPrintTarget()
-{
-    currentPrintTarget_ = previous;
-}
-
-const VM::PrintTarget& VM::currentPrintTarget()
-{
-    return currentPrintTarget_;
-}
-
-void VM::emitPrintOutput(const std::string& text, bool flush, bool here)
-{
-    if (here || !currentPrintTarget_.routesRemotely()) {
-        std::cout << text;
-        if (flush)
-            std::cout << std::flush;
-        return;
+    if (currentOutputRoute_.routesRemotely()) {
+        auto conn = currentOutputRoute_.remoteConn.lock();
+        if (delivery == OutputDelivery::LocalAndCallRoute) {
+            // Chunks shipped to a compute server retain the client's source
+            // name, but the .rox file itself is not shipped.  Give the server
+            // operator the diagnostic text while leaving source resolution to
+            // the originating client's sink.
+            OutputEventView localEvent = event;
+            localEvent.presentation = withoutPresentation(
+                localEvent.presentation, OutputPresentation::SourceExcerpt);
+            OutputRouter::emit(localEvent);
+            if (conn)
+                conn->sendOutputEvent(currentOutputRoute_.remoteCallId, event);
+            return;
+        }
+        if (delivery == OutputDelivery::FollowCallRoute && conn) {
+            conn->sendOutputEvent(currentOutputRoute_.remoteCallId, event);
+            return;
+        }
     }
-
-    auto conn = currentPrintTarget_.remoteConn.lock();
-    if (!conn) {
-        std::cout << text;
-        if (flush)
-            std::cout << std::flush;
-        return;
-    }
-
-    conn->sendPrintOutput(currentPrintTarget_.remoteCallId, text, flush);
-}
 #endif
+    OutputRouter::emit(event);
+}
+
+void VM::emitDiagnostic(std::string_view text,
+                        OutputSeverity severity,
+                        std::string_view category,
+                        bool flush)
+{
+    // Diagnostics and logs are records, not pre-terminated stream fragments.
+    // print() remains verbatim because its `end` argument is content.
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
+        text.remove_suffix(1);
+
+    OutputEventView event;
+    event.kind = OutputKind::Diagnostic;
+    event.severity = severity;
+    event.channel = "stderr";
+    event.category = category;
+    event.text = text;
+    event.flush = flush;
+    emitOutput(event, OutputDelivery::LocalAndCallRoute);
+}
 
 // Map BuiltinType to ValueType for automatic type conversion at call sites.
 // Returns nullopt for types that don't support automatic conversion (e.g.
@@ -6162,7 +6185,10 @@ void VM::enableOpcodeProfiling(std::string filePath)
         std::error_code ec;
         if (std::filesystem::exists(opcodeProfilePath, ec)) {
             if (ec) {
-                std::cerr << "Warning: unable to check opcode profile file '" << opcodeProfilePath << "': " << ec.message() << std::endl;
+                emitDiagnostic(
+                    "Warning: unable to check opcode profile file '" +
+                        opcodeProfilePath.string() + "': " + ec.message(),
+                    OutputSeverity::Warning, "vm.opcode-profile");
             } else {
                 std::ifstream in(opcodeProfilePath);
                 if (in) {
@@ -6200,14 +6226,23 @@ void VM::enableOpcodeProfiling(std::string filePath)
                             opcodeProfileCounts[opcodeIndex].store(value, std::memory_order_relaxed);
                         }
                     } else if (!err.empty()) {
-                        std::cerr << "Warning: failed to parse opcode profile file '" << opcodeProfilePath << "': " << err << std::endl;
+                        emitDiagnostic(
+                            "Warning: failed to parse opcode profile file '" +
+                                opcodeProfilePath.string() + "': " + err,
+                            OutputSeverity::Warning, "vm.opcode-profile");
                     }
                 } else {
-                    std::cerr << "Warning: failed to open opcode profile file '" << opcodeProfilePath << "' for reading" << std::endl;
+                    emitDiagnostic(
+                        "Warning: failed to open opcode profile file '" +
+                            opcodeProfilePath.string() + "' for reading",
+                        OutputSeverity::Warning, "vm.opcode-profile");
                 }
             }
         } else if (ec) {
-            std::cerr << "Warning: unable to check opcode profile file '" << opcodeProfilePath << "': " << ec.message() << std::endl;
+            emitDiagnostic(
+                "Warning: unable to check opcode profile file '" +
+                    opcodeProfilePath.string() + "': " + ec.message(),
+                OutputSeverity::Warning, "vm.opcode-profile");
         }
     }
 
@@ -6228,8 +6263,10 @@ void VM::writeOpcodeProfile()
     if (!parent.empty()) {
         std::filesystem::create_directories(parent, ec);
         if (ec) {
-            std::cerr << "Warning: failed to create directory for opcode profile file '" << opcodeProfilePath
-                      << "': " << ec.message() << std::endl;
+            emitDiagnostic(
+                "Warning: failed to create directory for opcode profile file '" +
+                    opcodeProfilePath.string() + "': " + ec.message(),
+                OutputSeverity::Warning, "vm.opcode-profile");
             return;
         }
     }
@@ -6242,15 +6279,20 @@ void VM::writeOpcodeProfile()
 
     std::ofstream out(opcodeProfilePath, std::ios::binary | std::ios::trunc);
     if (!out) {
-        std::cerr << "Warning: failed to open opcode profile file '" << opcodeProfilePath
-                  << "' for writing." << std::endl;
+        emitDiagnostic(
+            "Warning: failed to open opcode profile file '" +
+                opcodeProfilePath.string() + "' for writing.",
+            OutputSeverity::Warning, "vm.opcode-profile");
         return;
     }
 
     json11::Json json(obj);
     out << json.dump();
     if (!out) {
-        std::cerr << "Warning: failed to write opcode profile file '" << opcodeProfilePath << "'." << std::endl;
+        emitDiagnostic(
+            "Warning: failed to write opcode profile file '" +
+                opcodeProfilePath.string() + "'.",
+            OutputSeverity::Warning, "vm.opcode-profile");
     }
 #endif
 }
@@ -7384,7 +7426,10 @@ std::pair<ExecutionStatus,Value> VM::execute(TimePoint deadline, size_t baseFram
                                  "' for "+inst.typeName()+" value.");
 #ifdef DEBUG_BUILD
                 if (inst.isObj()) {
-                    std::cerr << "GetProp fallback objType=" << int(objType(inst)) << std::endl;
+                    emitDiagnostic(
+                        "GetProp fallback objType=" +
+                            std::to_string(int(objType(inst))),
+                        OutputSeverity::Debug, "vm.getprop");
                 }
 #endif
                 return errorReturn;
@@ -12308,13 +12353,31 @@ void VM::runtimeError(const std::string& format, ...)
             entry.second->wake();
     });
 
+    va_list args;
+    va_start(args, format);
+    va_list countArgs;
+    va_copy(countArgs, args);
+    const int required = std::vsnprintf(nullptr, 0, format.c_str(), countArgs);
+    va_end(countArgs);
+    std::string message;
+    if (required < 0) {
+        message = format;
+    } else {
+        std::vector<char> buffer(static_cast<std::size_t>(required) + 1);
+        std::vsnprintf(buffer.data(), buffer.size(), format.c_str(), args);
+        message.assign(buffer.data(), static_cast<std::size_t>(required));
+    }
+    va_end(args);
     if (!thread || thread->frames.empty()) {
-        fprintf(stderr, "error: ");
-        va_list args;
-        va_start(args, format);
-        vfprintf(stderr, format.c_str(), args);
-        va_end(args);
-        fputs("\n", stderr);
+        const std::string text = "error: " + message;
+        OutputEventView event;
+        event.kind = OutputKind::Diagnostic;
+        event.severity = OutputSeverity::Error;
+        event.channel = "stderr";
+        event.category = "runtime";
+        event.text = text;
+        event.flush = true;
+        emitOutput(event, OutputDelivery::LocalAndCallRoute);
         resetStack();
         return;
     }
@@ -12328,7 +12391,9 @@ void VM::runtimeError(const std::string& format, ...)
     int col  = chunk->getColumn(instruction);
     std::string fname = toUTF8StdString(chunk->sourceName);
 
-    // output stacktrace
+    std::ostringstream rendered;
+    // Render stack metadata only.  Source-file lookup belongs to the terminal
+    // sink so an asynchronous embedding can defer it off the runFor() thread.
     for(auto it = thread->frames.begin(); it != thread->frames.end(); ++it) {
         const CallFrame& f { *it };
         auto c = asFunction(asClosure(f.closure)->function)->chunk;
@@ -12342,38 +12407,36 @@ void VM::runtimeError(const std::string& format, ...)
         if (funcName.isEmpty())
             funcName = ustring("<script>");
         if (!fn.empty())
-            fprintf(stderr, "%s:%d:%d: in %s\n", fn.c_str(), ln, cl,
-                    toUTF8StdString(funcName).c_str());
+            rendered << fn << ':' << ln << ':' << cl << ": in "
+                     << toUTF8StdString(funcName) << '\n';
         else
-            fprintf(stderr, "[line %d:%d]: in %s\n", ln, cl,
-                    toUTF8StdString(funcName).c_str());
+            rendered << "[line " << ln << ':' << cl << "]: in "
+                     << toUTF8StdString(funcName) << '\n';
     }
 
     if (!fname.empty())
-        fprintf(stderr, "%s:%d:%d: error: ", fname.c_str(), line, col);
+        rendered << fname << ':' << line << ':' << col << ": error: ";
     else
-        fprintf(stderr, "[line %d:%d]: error: ", line, col);
+        rendered << "[line " << line << ':' << col << "]: error: ";
+    rendered << message;
 
-    va_list args;
-    va_start(args, format);
-    vfprintf(stderr, format.c_str(), args);
-    va_end(args);
-    fputs("\n", stderr);
-
-    if (!fname.empty()) {
-        std::ifstream src(fname);
-        if (src.good()) {
-            std::string srcLine;
-            for (int i = 1; i <= line && std::getline(src, srcLine); ++i) {
-                if (i == line) {
-                    fprintf(stderr, "    %d | %s\n", line, srcLine.c_str());
-                    std::string lstr = std::to_string(line);
-                    size_t indent = 4 + lstr.length() + 1; // spaces before '|'
-                    fprintf(stderr, "%s| %s^\n", spaces(indent).c_str(), spaces(col).c_str());
-                }
-            }
-        }
+    const std::string text = rendered.str();
+    OutputEventView event;
+    event.kind = OutputKind::Diagnostic;
+    event.severity = OutputSeverity::Error;
+    event.channel = "stderr";
+    event.category = "runtime";
+    event.text = text;
+    event.flush = true;
+    if (!fname.empty() && line > 0) {
+        event.presentation = OutputPresentation::SourceExcerpt;
+        event.source = OutputSourceLocationView{
+            fname,
+            static_cast<std::uint32_t>(line),
+            static_cast<std::uint32_t>(std::max(0, col))
+        };
     }
+    emitOutput(event, OutputDelivery::LocalAndCallRoute);
 
     resetStack();
 }
@@ -14484,17 +14547,17 @@ Value VM::dataflow_run_native(ArgsView args)
     // of the process: the tick number stops advancing and every periodic signal
     // silently stops, while the VM, the host loop and event-driven islands all
     // carry on -- so the program looks alive and merely stops producing values.
-    // Whatever handling the caller applies, say so first, on a stream that
-    // survives (std::cerr is proxied and lost on wasm worker threads).
+    // Whatever handling the caller applies, report it first through the host
+    // sink (direct worker-thread stderr is proxied and lost on wasm).
     try {
         df::DataflowEngine::instance()->run();
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "dataflow engine stopped: %s\n", e.what());
-        std::fflush(stderr);
+        emitDiagnostic(std::string("dataflow engine stopped: ") + e.what(),
+                       OutputSeverity::Error, "dataflow");
         throw;
     } catch (...) {
-        std::fprintf(stderr, "dataflow engine stopped: unknown exception\n");
-        std::fflush(stderr);
+        emitDiagnostic("dataflow engine stopped: unknown exception",
+                       OutputSeverity::Error, "dataflow");
         throw;
     }
     return Value::nilVal();

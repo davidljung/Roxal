@@ -7647,9 +7647,7 @@ Value ActorInstance::queueCall(const Value& callee, const CallSpec& callSpec, Va
     MethodCallInfo callInfo {};
     callInfo.callee = callee;
     callInfo.callSpec = callSpec;
-#ifdef ROXAL_COMPUTE_SERVER
-    callInfo.printTarget = VM::currentPrintTarget();
-#endif
+    callInfo.outputRoute = VM::currentOutputRoute();
 
     // Extract function type info early so we can check param constness in the arg loop
     const std::vector<std::optional<type::Type::FuncType::ParamType>>* paramTypes = nullptr;

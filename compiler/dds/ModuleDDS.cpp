@@ -117,8 +117,10 @@ Value ModuleDDS::importIdl(const std::string& idlFilename,
         if (name == "ros")
             rosProfile = true;
         else
-            std::cerr << "warning: ignoring unrecognised annotation '@" << name
-                      << "' on IDL import '" << idlFilename << "'" << std::endl;
+            VM::emitDiagnostic(
+                "warning: ignoring unrecognised annotation '@" + name +
+                    "' on IDL import '" + idlFilename + "'",
+                OutputSeverity::Warning, "dds.import");
     }
 
     // The same file cannot be imported under two profiles: compile-time and
@@ -1311,7 +1313,9 @@ void ModuleDDS::registerWriterSignal(const Value& sigVal, const Value& writerVal
             fillSampleFromValue(*info, descPtr, sample.get(), sampleVal);
             dds_return_t rc = ::dds_write(writer, sample.get());
             if (rc < 0) {
-                fprintf(stderr, "dds_write signal error: %s\n", dds_strretcode(-rc));
+                VM::emitDiagnostic(
+                    std::string("dds_write signal error: ") + dds_strretcode(-rc),
+                    OutputSeverity::Error, "dds.writer");
             }
         }));
     }
@@ -2352,7 +2356,9 @@ void ModuleDDS::drainReaderBinding(const SignalBinding& binding)
     for (;;) {
         dds_return_t got = ::dds_take(binding.entity, samples, infos, kBatch, kBatch);
         if (got < 0) {
-            fprintf(stderr, "dds_take error: %s\n", dds_strretcode(-got));
+            VM::emitDiagnostic(std::string("dds_take error: ") +
+                                   dds_strretcode(-got),
+                               OutputSeverity::Error, "dds.reader");
             break;
         }
         if (got == 0)
@@ -2403,15 +2409,19 @@ void ModuleDDS::readerThreadLoop()
                 continue;
             dds_entity_t cond = dds_create_readcondition(b.entity, DDS_ANY_STATE);
             if (cond <= 0) {
-                fprintf(stderr, "dds reader signal: dds_create_readcondition: %s\n",
-                        dds_strretcode(-cond));
+                VM::emitDiagnostic(
+                    std::string("dds reader signal: dds_create_readcondition: ") +
+                        dds_strretcode(-cond),
+                    OutputSeverity::Error, "dds.reader");
                 continue;
             }
             dds_return_t rc = dds_waitset_attach(readerWaitset, cond,
                                                  static_cast<dds_attach_t>(b.entity));
             if (rc < 0) {
-                fprintf(stderr, "dds reader signal: dds_waitset_attach: %s\n",
-                        dds_strretcode(-rc));
+                VM::emitDiagnostic(
+                    std::string("dds reader signal: dds_waitset_attach: ") +
+                        dds_strretcode(-rc),
+                    OutputSeverity::Error, "dds.reader");
                 ::dds_delete(cond);
                 continue;
             }
@@ -2443,7 +2453,10 @@ void ModuleDDS::readerThreadLoop()
         if (!readerThreadRunning.load())
             break;
         if (n < 0) {
-            fprintf(stderr, "dds reader signal: dds_waitset_wait: %s\n", dds_strretcode(-n));
+            VM::emitDiagnostic(
+                std::string("dds reader signal: dds_waitset_wait: ") +
+                    dds_strretcode(-n),
+                OutputSeverity::Error, "dds.reader");
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
@@ -2504,7 +2517,8 @@ void ModuleDDS::startReaderThread()
         readerGuard = dds_create_guardcondition(DDS_CYCLONEDDS_HANDLE);
         if (readerWaitset <= 0 || readerGuard <= 0 ||
             dds_waitset_attach(readerWaitset, readerGuard, 0) < 0) {
-            fprintf(stderr, "dds reader signal: failed to create waitset/guard\n");
+            VM::emitDiagnostic("dds reader signal: failed to create waitset/guard",
+                               OutputSeverity::Error, "dds.reader");
             readerThreadRunning.store(false);
             return;
         }

@@ -153,10 +153,13 @@ class InferenceWorker {
                 Value result = currentJob.work();
                 currentJob.promise->set_value(result);
             } catch (const std::exception& e) {
-                std::cerr << "ai.nn InferenceWorker error: " << e.what() << std::endl;
+                VM::emitDiagnostic(
+                    std::string("ai.nn InferenceWorker error: ") + e.what(),
+                    OutputSeverity::Error, "ai.nn");
                 currentJob.promise->set_value(Value::nilVal());
             } catch (...) {
-                std::cerr << "ai.nn InferenceWorker: unknown error" << std::endl;
+                VM::emitDiagnostic("ai.nn InferenceWorker: unknown error",
+                                   OutputSeverity::Error, "ai.nn");
                 currentJob.promise->set_value(Value::nilVal());
             }
             {

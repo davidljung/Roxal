@@ -52,7 +52,8 @@ struct WebHostLoop : HostEventLoop {
             WebStoreHub::instance().flushAll();
             flush();          // one proxied batch for everything above
         } catch (const std::exception& e) {
-            std::cerr << "web: " << e.what() << std::endl;
+            VM::emitDiagnostic(std::string("web: ") + e.what(),
+                               OutputSeverity::Error, "web.host-loop");
         } catch (...) {
         }
         --pumpDepth_;

@@ -1309,10 +1309,12 @@ void ModuleSys::registerBuiltins(VM& vm)
             Value::stringVal(toUnicodeString("")),
             Value::stringVal(toUnicodeString("\n")),
             Value::falseVal(),
-            Value::falseVal()
+            Value::falseVal(),
+            Value::stringVal(toUnicodeString("stdout"))
         };
         // Construct funcType matching:
-        // proc print(value:string='', end='\n', flush:bool=false, here:bool=false)
+        // proc print(value:string='', end='\n', flush:bool=false,
+        //            here:bool=false, channel:string='stdout')
         // The :string type on value enables async user-defined conversion (operator->string)
         // for objects passed to print, via callNativeFn's NativeParamConversionState.
         ptr<type::Type> printType = make_ptr<type::Type>(type::BuiltinType::Func);
@@ -1322,7 +1324,8 @@ void ModuleSys::registerBuiltins(VM& vm)
             {"value", type::BuiltinType::String},
             {"end", type::BuiltinType::String},
             {"flush", type::BuiltinType::Bool},
-            {"here", type::BuiltinType::Bool}
+            {"here", type::BuiltinType::Bool},
+            {"channel", type::BuiltinType::String}
         }, pdefaults);
         printType->func->params.resize(printParams.size());
         for (size_t i = 0; i < printParams.size(); ++i) printType->func->params[i] = printParams[i];
@@ -1709,8 +1712,9 @@ void ModuleSys::registerBuiltins(VM& vm)
 
 Value ModuleSys::print_builtin(VM& vm, ArgsView args)
 {
-    if(args.size() > 4)
-        throw std::invalid_argument("print expects at most 4 arguments");
+    (void)vm;
+    if(args.size() > 5)
+        throw std::invalid_argument("print expects at most 5 arguments");
 
     // value param is typed :string — async user-defined conversions (operator->string)
     // are handled by callNativeFn's NativeParamConversionState before we get here.
@@ -1718,30 +1722,35 @@ Value ModuleSys::print_builtin(VM& vm, ArgsView args)
     std::string endStr = "\n";
     bool flush = false;
     bool here = false;
+    std::string channel = "stdout";
 
     if(args.size() >= 1)
         valueStr = toString(args[0]);
 
-    if(args.size() == 2 && args[1].isBool()) {
-        flush = args[1].asBool();
-    } else {
-        if(args.size() >= 2)
-            endStr = toString(args[1]);
-        if(args.size() >= 3)
-            flush = toType(ValueType::Bool, args[2], false).asBool();
-        if(args.size() >= 4)
-            here = toType(ValueType::Bool, args[3], false).asBool();
+    if(args.size() >= 2)
+        endStr = toString(args[1]);
+    if(args.size() >= 3)
+        flush = toType(ValueType::Bool, args[2], false).asBool();
+    if(args.size() >= 4)
+        here = toType(ValueType::Bool, args[3], false).asBool();
+    if(args.size() >= 5)
+        channel = toString(args[4]);
+
+    if (channel.empty() || channel.size() > OutputChannelMaxBytes) {
+        throw std::invalid_argument(
+            "print channel must contain 1.." +
+            std::to_string(OutputChannelMaxBytes) + " UTF-8 bytes");
     }
 
-#ifdef ROXAL_COMPUTE_SERVER
-    VM::emitPrintOutput(valueStr + endStr, flush, here);
-#else
-    (void)vm;
-    (void)here;
-    std::cout << valueStr << endStr;
-    if(flush)
-        std::cout << std::flush;
-#endif
+    std::string text = valueStr + endStr;
+    OutputEventView event;
+    event.kind = OutputKind::Print;
+    event.severity = OutputSeverity::None;
+    event.channel = channel;
+    event.text = text;
+    event.flush = flush;
+    VM::emitOutput(event, here ? OutputDelivery::LocalOnly
+                               : OutputDelivery::FollowCallRoute);
     return Value::nilVal();
 }
 
@@ -1765,7 +1774,8 @@ Value ModuleSys::len_builtin(VM& vm, ArgsView args)
         } break;
         default:
 #ifdef DEBUG_BUILD
-        std::cerr << "Unhandled type in len():" << v.typeName() << std::endl;
+        VM::emitDiagnostic("Unhandled type in len():" + v.typeName(),
+                           OutputSeverity::Warning, "sys.len");
 #endif
         ;
     }
@@ -2299,105 +2309,59 @@ Value ModuleSys::runtests_builtin(VM& vm, ArgsView args)
 
     auto suite = toUTF8StdString(asStringObj(args[0])->s);
 
+    auto printLine = [](std::string text) {
+        text.push_back('\n');
+        OutputEventView event;
+        event.kind = OutputKind::Print;
+        event.severity = OutputSeverity::None;
+        event.channel = "stdout";
+        event.text = text;
+        VM::emitOutput(event);
+    };
+    auto reportResults = [&](const auto& results) {
+        int passes = 0;
+        int fails = 0;
+        for (const auto& result : results) {
+            const bool passed = std::get<1>(result);
+            printLine("Test: " + std::get<0>(result) + " " +
+                      (passed ? "passed" : "failed") + " " +
+                      std::get<2>(result));
+            if (passed)
+                ++passes;
+            else
+                ++fails;
+        }
+        printLine("Passed " + std::to_string(passes) + " failed " +
+                  std::to_string(fails));
+    };
+
     if (suite == "gc_coordination") {
         const bool pass = SimpleMarkSweepGC::instance().runCoordinationSelfTest();
-        std::cout << "GC coordination self-test "
-                  << (pass ? "PASSED" : "FAILED") << std::endl;
+        printLine(std::string("GC coordination self-test ") +
+                  (pass ? "PASSED" : "FAILED"));
     }
     else if (suite == "gc_scanner") {
         const bool pass = SimpleMarkSweepGC::instance().runScannerRecallSelfTest();
-        std::cout << "GC scanner recall self-test "
-                  << (pass ? "PASSED" : "FAILED") << std::endl;
+        printLine(std::string("GC scanner recall self-test ") +
+                  (pass ? "PASSED" : "FAILED"));
     }
     else if (suite == "dataflow") {
         // TODO: Dataflow tests have been moved out - need to implement new roxal-based tests
-        std::cout << "Dataflow tests temporarily disabled during Func class elimination" << std::endl;
+        printLine("Dataflow tests temporarily disabled during Func class elimination");
         if (auto engine = df::DataflowEngine::instance(false))
             engine->clear();
     }
     else if (suite == "conversions") {
-        auto results = testConversions();
-
-        int passes = 0;
-        int fails = 0;
-        for (const auto& result : results) {
-            std::cout << "Test: " << std::get<0>(result) << " ";
-            bool passed = std::get<1>(result);
-            if (passed) {
-                std::cout << "passed";
-                passes++;
-            }
-            else {
-                std::cout << "failed";
-                fails++;
-            }
-            std::cout << " " << std::get<2>(result) << std::endl;
-        }
-
-        std::cout << "Passed " << passes << " failed " << fails << std::endl;
+        reportResults(testConversions());
     }
     else if (suite == "serialize") {
-        auto results = testValueSerialization();
-
-        int passes = 0;
-        int fails = 0;
-        for (const auto& result : results) {
-            std::cout << "Test: " << std::get<0>(result) << " ";
-            bool passed = std::get<1>(result);
-            if (passed) {
-                std::cout << "passed";
-                passes++;
-            }
-            else {
-                std::cout << "failed";
-                fails++;
-            }
-            std::cout << " " << std::get<2>(result) << std::endl;
-        }
-
-        std::cout << "Passed " << passes << " failed " << fails << std::endl;
+        reportResults(testValueSerialization());
     }
     else if (suite == "annotations") {
-        auto results = testAnnotations();
-
-        int passes = 0;
-        int fails = 0;
-        for (const auto& result : results) {
-            std::cout << "Test: " << std::get<0>(result) << " ";
-            bool passed = std::get<1>(result);
-            if (passed) {
-                std::cout << "passed";
-                passes++;
-            }
-            else {
-                std::cout << "failed";
-                fails++;
-            }
-            std::cout << " " << std::get<2>(result) << std::endl;
-        }
-
-        std::cout << "Passed " << passes << " failed " << fails << std::endl;
+        reportResults(testAnnotations());
     }
     else if (suite == "orient") {
-        auto results = testOrientConversions();
-
-        int passes = 0;
-        int fails = 0;
-        for (const auto& result : results) {
-            std::cout << "Test: " << std::get<0>(result) << " ";
-            bool passed = std::get<1>(result);
-            if (passed) {
-                std::cout << "passed";
-                passes++;
-            }
-            else {
-                std::cout << "failed";
-                fails++;
-            }
-            std::cout << " " << std::get<2>(result) << std::endl;
-        }
-
-        std::cout << "Passed " << passes << " failed " << fails << std::endl;
+        reportResults(testOrientConversions());
     }
     else if (suite == "rt_execution") {
         // RT Execution tests for tickFor() deadline-aware execution
@@ -2405,9 +2369,11 @@ Value ModuleSys::runtests_builtin(VM& vm, ArgsView args)
         int fails = 0;
 
         auto reportTest = [&](const std::string& name, bool passed, const std::string& detail = "") {
-            std::cout << "Test: " << name << " " << (passed ? "passed" : "FAILED");
-            if (!detail.empty()) std::cout << " - " << detail;
-            std::cout << std::endl;
+            std::string line = "Test: " + name + " " +
+                               (passed ? "passed" : "FAILED");
+            if (!detail.empty())
+                line += " - " + detail;
+            printLine(std::move(line));
             if (passed) passes++; else fails++;
         };
 
@@ -3307,7 +3273,8 @@ Value ModuleSys::runtests_builtin(VM& vm, ArgsView args)
 
         engine.clear();
         vm.setSynchronousExecution(true); // restore guard
-        std::cout << "RT Execution tests: Passed " << passes << " failed " << fails << std::endl;
+        printLine("RT Execution tests: Passed " + std::to_string(passes) +
+                  " failed " + std::to_string(fails));
     }
 
     return Value::nilVal();

@@ -307,8 +307,9 @@ void RoxalStore::applyWrite(const std::string& prop, const Value& value)
     const Role* r = roleByName(prop);
     if (!r || !isExposable(obj_)) return;
     if (!r->editable) {
-        std::cerr << "web: ignoring write to read-only '" << name_ << "." << prop << "'"
-                  << std::endl;
+        VM::emitDiagnostic(
+            "web: ignoring write to read-only '" + name_ + "." + prop + "'",
+            OutputSeverity::Warning, "web.store");
         return;
     }
 

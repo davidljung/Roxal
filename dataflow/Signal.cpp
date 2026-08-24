@@ -8,6 +8,7 @@
 
 #include "Signal.h"
 #include "DataflowEngine.h"
+#include "compiler/VM.h"
 #include <stdexcept>
 #include <iostream>
 
@@ -236,8 +237,10 @@ void Signal::setValueAt(TimePoint t, const Value& v)
         // signal's period.  (An absolute check would misfire instead on
         // set()'s deliberate tickStart+period scheduling.)
         if (t >= tickStart && (age % m_period != TimeDuration::zero())) {
-            std::cerr << "setValueAt Signal " + name() + " for time " + t.humanString() +
-                " not a multiple of period " + m_period.humanString() << std::endl;
+            roxal::VM::emitDiagnostic(
+                "setValueAt Signal " + name() + " for time " + t.humanString() +
+                    " not a multiple of period " + m_period.humanString(),
+                roxal::OutputSeverity::Warning, "dataflow.signal");
         }
 #endif
     }

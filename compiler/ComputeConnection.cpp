@@ -526,7 +526,7 @@ ptr<ComputeConnection> ComputeConnection::connect(const std::string& hostPort)
         // Use call_id=0 as the handshake slot (real calls start at 1)
         ComputeConnection::PendingCall pending {};
         pending.promise = make_ptr<std::promise<Value>>();
-        pending.printTarget = ComputeConnection::PrintTarget::localStdout();
+        pending.outputRoute = OutputRoute::local();
         conn->pendingCalls_[0] = pending;
     }
 
@@ -646,33 +646,30 @@ void ComputeConnection::rejectCall(uint64_t callId, const std::string& errorMsg)
     pendingCalls_.erase(it);
 }
 
-void ComputeConnection::deliverPrintOutput(uint64_t callId, const std::string& text, bool flush)
+void ComputeConnection::deliverOutputEvent(uint64_t callId,
+                                           const OutputEventView& event)
 {
-    ComputeConnection::PrintTarget target = ComputeConnection::PrintTarget::localStdout();
+    OutputRoute route = OutputRoute::local();
     {
         std::lock_guard<std::mutex> lk(pendingMu_);
         auto it = pendingCalls_.find(callId);
         if (it == pendingCalls_.end())
             return;
-        target = it->second.printTarget;
+        route = it->second.outputRoute;
     }
 
-    if (!target.routesRemotely()) {
-        std::cout << text;
-        if (flush)
-            std::cout << std::flush;
+    if (!route.routesRemotely()) {
+        OutputRouter::emit(event);
         return;
     }
 
-    auto upstreamConn = target.remoteConn.lock();
+    auto upstreamConn = route.remoteConn.lock();
     if (!upstreamConn) {
-        std::cout << text;
-        if (flush)
-            std::cout << std::flush;
+        OutputRouter::emit(event);
         return;
     }
 
-    upstreamConn->sendPrintOutput(target.remoteCallId, text, flush);
+    upstreamConn->sendOutputEvent(route.remoteCallId, event);
 }
 
 // ---------------------------------------------------------------------------
@@ -794,7 +791,7 @@ Value ComputeConnection::spawnActor(const Value& actorTypeVal,
         std::lock_guard<std::mutex> lk(pendingMu_);
         ComputeConnection::PendingCall pending {};
         pending.promise = promise;
-        pending.printTarget = VM::currentPrintTarget();
+        pending.outputRoute = VM::currentOutputRoute();
         pendingCalls_[callId] = pending;
     }
 
@@ -845,7 +842,7 @@ Value ComputeConnection::callRemoteMethod(int64_t remoteActorId,
         std::lock_guard<std::mutex> lk(pendingMu_);
         ComputeConnection::PendingCall pending {};
         pending.promise = promise;
-        pending.printTarget = VM::currentPrintTarget();
+        pending.outputRoute = VM::currentOutputRoute();
         pending.gcRootedResultSlot = gcRootedResultSlot;
         pendingCalls_[callId] = pending;
     }
@@ -892,16 +889,16 @@ void ComputeConnection::sendActorDropped(int64_t actorId)
     sendFrame(ComputeMsg::ActorDropped, payload);
 }
 
-void ComputeConnection::sendPrintOutput(uint64_t callId, const std::string& text, bool flush)
+void ComputeConnection::sendOutputEvent(uint64_t callId,
+                                        const OutputEventView& event)
 {
     if (!alive_.load())
         return;
 
     std::vector<std::uint8_t> payload;
     writeU64(payload, callId);
-    writeU8(payload, flush ? 1 : 0);
-    writeString(payload, text);
-    sendFrame(ComputeMsg::PrintOutput, payload);
+    writeOutputEvent(payload, event);
+    sendFrame(ComputeMsg::OutputEvent, payload);
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,8 +1010,7 @@ void ComputeConnection::handleIncomingCall(uint64_t callId, int64_t actorId,
 
             Value* argTop = args.empty() ? nullptr
                                          : const_cast<Value*>(args.data() + args.size());
-            VM::ScopedPrintTarget printTargetScope(
-                    ActorInstance::MethodCallInfo::PrintTarget::remoteCall(conn, callId));
+            VM::ScopedOutputRoute outputRouteScope(OutputRoute::remoteCall(conn, callId));
             gcParticipant.pollSafepointIfRequested();
             completion = asActorInstance(actorVal)->queueCall(callee, callSpec, argTop,
                                                               /*forceCompletionFuture=*/true);
@@ -1119,11 +1115,10 @@ void ComputeConnection::readerLoop()
                 break;
             }
 
-            case ComputeMsg::PrintOutput: {
+            case ComputeMsg::OutputEvent: {
                 uint64_t callId = readU64(p, end);
-                bool flush = readU8(p, end) != 0;
-                std::string text = readString(p, end);
-                deliverPrintOutput(callId, text, flush);
+                OutputEvent event = readOutputEvent(p, end);
+                deliverOutputEvent(callId, event.view());
                 break;
             }
 

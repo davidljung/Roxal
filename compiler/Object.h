@@ -29,6 +29,7 @@
 #include "Chunk.h"
 #include "Value.h"
 #include "ChangeNotifier.h"
+#include "OutputRoute.h"
 #include "SimpleMarkSweepGC.h"
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -63,9 +64,6 @@ struct ObjEventType; // forward
 struct ObjEventInstance; // forward
 struct ObjFunction; // forward for bound native default values
 struct ObjException; // forward
-#ifdef ROXAL_COMPUTE_SERVER
-class ComputeConnection; // forward
-#endif
 
 void visitInternedStrings(const std::function<void(ObjString*)>& fn);
 void purgeDeadInternedStrings();
@@ -2479,32 +2477,7 @@ struct ActorInstance : public Obj
         ptr<std::promise<Value>> returnPromise;
         Value returnFuture;
         CallSpec callSpec;
-#ifdef ROXAL_COMPUTE_SERVER
-        struct PrintTarget {
-            enum class Kind : std::uint8_t {
-                LocalStdout,
-                RemoteCall
-            };
-
-            Kind kind { Kind::LocalStdout };
-            weak_ptr<ComputeConnection> remoteConn;
-            uint64_t remoteCallId { 0 };
-
-            static PrintTarget localStdout() { return {}; }
-
-            static PrintTarget remoteCall(const ptr<ComputeConnection>& conn, uint64_t callId) {
-                PrintTarget target;
-                target.kind = Kind::RemoteCall;
-                target.remoteConn = conn;
-                target.remoteCallId = callId;
-                return target;
-            }
-
-            bool routesRemotely() const { return kind == Kind::RemoteCall; }
-        };
-
-        PrintTarget printTarget;
-#endif
+        OutputRoute outputRoute;
 
         bool valid() const { return !callee.isNil(); }
     };

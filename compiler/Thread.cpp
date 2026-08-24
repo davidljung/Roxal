@@ -382,8 +382,8 @@ void Thread::act(Value actorInstance)
                     // Ensure actor instance stays alive during call
                     this->stack[0] = strongActor;
 
+                    VM::ScopedOutputRoute outputRouteScope(callInfo.outputRoute);
 #ifdef ROXAL_COMPUTE_SERVER
-                    VM::ScopedPrintTarget printTargetScope(callInfo.printTarget);
                     if (actorInst->isRemote) {
                         remoteComputeCallState.active = true;
                         remoteComputeCallState.args.assign(callInfo.args.rbegin(), callInfo.args.rend());
@@ -411,7 +411,9 @@ void Thread::act(Value actorInstance)
                                 }
                             }
                         } catch (const std::exception& e) {
-                            std::cerr << "Remote actor call failed: " << e.what() << std::endl;
+                            VM::emitDiagnostic(
+                                std::string("Remote actor call failed: ") + e.what(),
+                                OutputSeverity::Error, "actor.remote");
                             if (callInfo.returnPromise != nullptr) {
                                 callInfo.returnPromise->set_value(Value::nilVal());
                                 callInfo.returnPromise = nullptr;
@@ -526,9 +528,11 @@ void Thread::act(Value actorInstance)
                                 // (this silence hid the dataflow engine's
                                 // death for a whole session).
                                 if (!ok && !isException(forward)) {
-                                    std::fprintf(stderr, "actor native call '%s' failed: %s\n",
-                                                 toUTF8StdString(function->name).c_str(), nativeErr.c_str());
-                                    std::fflush(stderr);
+                                    VM::emitDiagnostic(
+                                        "actor native call '" +
+                                            toUTF8StdString(function->name) +
+                                            "' failed: " + nativeErr,
+                                        OutputSeverity::Error, "actor.call");
                                 }
                             } else if (!ok) {
                                 // Fire-and-forget native call threw: nobody
@@ -536,9 +540,11 @@ void Thread::act(Value actorInstance)
                                 // pending exception so it cannot leak into the
                                 // NEXT call's failure path.
                                 pendingUncaughtException = Value::nilVal();
-                                std::fprintf(stderr, "actor native call '%s' failed: %s\n",
-                                             toUTF8StdString(function->name).c_str(), nativeErr.c_str());
-                                std::fflush(stderr);
+                                VM::emitDiagnostic(
+                                    "actor native call '" +
+                                        toUTF8StdString(function->name) +
+                                        "' failed: " + nativeErr,
+                                    OutputSeverity::Error, "actor.call");
                             }
 
                             {
@@ -615,10 +621,12 @@ void Thread::act(Value actorInstance)
                                 callInfo.returnFuture = Value::nilVal();
                             }
                         } else if (haveException) {
-                            std::fprintf(stderr, "Uncaught exception in actor call '%s' (no awaiter): %s\n",
-                                         toUTF8StdString(function->name).c_str(),
-                                         objExceptionToString(asException(pendingExc)).c_str());
-                            std::fflush(stderr);
+                            VM::emitDiagnostic(
+                                "Uncaught exception in actor call '" +
+                                    toUTF8StdString(function->name) +
+                                    "' (no awaiter): " +
+                                    objExceptionToString(asException(pendingExc)),
+                                OutputSeverity::Error, "actor.call");
                             forwardedException = true;   // reported: keep serving
                         }
                         // reset stack before breaking
@@ -734,9 +742,10 @@ void Thread::act(Value actorInstance)
                                 std::string bnName = isFunction(bn->declFunction)
                                     ? toUTF8StdString(asFunction(bn->declFunction)->name)
                                     : std::string("<native>");
-                                std::fprintf(stderr, "actor native call '%s' failed: %s\n",
-                                             bnName.c_str(), nativeErr.c_str());
-                                std::fflush(stderr);
+                                VM::emitDiagnostic(
+                                    "actor native call '" + bnName +
+                                        "' failed: " + nativeErr,
+                                    OutputSeverity::Error, "actor.call");
                             }
                         } else if (!ok) {
                             // Fire-and-forget native call threw: report and
@@ -746,9 +755,10 @@ void Thread::act(Value actorInstance)
                             std::string bnName = isFunction(bn->declFunction)
                                 ? toUTF8StdString(asFunction(bn->declFunction)->name)
                                 : std::string("<native>");
-                            std::fprintf(stderr, "actor native call '%s' failed: %s\n",
-                                         bnName.c_str(), nativeErr.c_str());
-                            std::fflush(stderr);
+                            VM::emitDiagnostic(
+                                "actor native call '" + bnName +
+                                    "' failed: " + nativeErr,
+                                OutputSeverity::Error, "actor.call");
                         }
                     }
 
