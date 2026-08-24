@@ -609,6 +609,7 @@ endif()
 set(ROXALAST_SOURCES
     core/AST.cpp
     core/common.cpp
+    core/Output.cpp
     core/types.cpp
     compiler/ASTGenerator.cpp
     compiler/AstPrinter.cpp
