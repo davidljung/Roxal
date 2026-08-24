@@ -357,7 +357,8 @@ fileio_tests = [
 dds_tests = ['dds_bounded_ok', 'dds_bounded_fail', 'dds_complex_smoke', 'dds_array_ok', 'dds_array_struct', 'dds_array_multi', 'dds_nested_module',
              'dds_idl_include', 'dds_idl_include_missing', 'dds_idl_stock',
              'dds_ros_import', 'dds_ros_signal_roundtrip', 'dds_ros_camerainfo',
-             'dds_signal_keepall', 'dds_signal_keeplast', 'dds_ros_signal_lift']
+             'dds_signal_keepall', 'dds_signal_keeplast', 'dds_ros_signal_lift',
+             'dds_writer_signal_shared', 'dds_close_subtree']
 regex_tests = ['regex_test']
 inspect_tests = [
     'inspect_parse', 'inspect_fields', 'inspect_walk', 'inspect_parent',

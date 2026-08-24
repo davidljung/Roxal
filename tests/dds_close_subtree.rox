@@ -1,0 +1,50 @@
+# Closing a container deletes its whole subtree in Cyclone, so closing a child
+# afterwards must be a no-op.  Without that, dds.close(writer) after
+# dds.close(participant) reaches dds_delete with a handle Cyclone has already
+# freed -- and may by then have reissued to an unrelated entity.
+import HelloWorldData
+import dds
+import sys
+
+qos = {'reliability': 'reliable'}
+p = dds.create_participant()
+t = dds.create_topic(p, 'close_subtree', HelloWorldData.Msg, qos)
+w = dds.create_writer(p, t, qos)
+r = dds.create_reader(p, t, qos)
+
+wsig = dds.create_writer_signal(w)
+var m = HelloWorldData.Msg()
+m.userID = 1
+m.message = "before_close"
+wsig.set(m)
+
+var got = nil
+var tries = 0
+while got == nil and tries < 600:
+  got = dds.read(r)
+  sys.wait(5ms)
+  tries = tries + 1
+print("before close {got.message}")
+
+dds.close(p)
+dds.close(w)
+dds.close(r)
+
+# Prove the module is still healthy once the stale child closes have been absorbed.
+p2 = dds.create_participant()
+t2 = dds.create_topic(p2, 'close_subtree2', HelloWorldData.Msg, qos)
+w2 = dds.create_writer(p2, t2, qos)
+r2 = dds.create_reader(p2, t2, qos)
+
+var m2 = HelloWorldData.Msg()
+m2.userID = 2
+m2.message = "after_close"
+wait(for=dds.write(w2, m2))
+
+var got2 = nil
+var tries2 = 0
+while got2 == nil and tries2 < 600:
+  got2 = dds.read(r2)
+  sys.wait(5ms)
+  tries2 = tries2 + 1
+print("after close {got2.message}")

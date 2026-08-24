@@ -287,8 +287,9 @@ void DataflowEngine::copyInto(const ptr<Signal>& lhs, const ptr<Signal>& rhs)
         rhsValues = rhs->values;
         lhs->values = rhs->values;
     }
-    for(const auto& rhsCallback : rhs->m_changeNotifier.callbacks)
-        lhs->m_changeNotifier.addCallback(rhsCallback);
+    // Move (not copy) rhs's observers: rhs is being retired, and its subscribers'
+    // handles keep working because they reference the slot, not the list.
+    lhs->adoptValueChangedFrom(rhs->m_changeNotifier);
 
     lhs->isDerived = rhs->isDerived;
     lhs->baseSignal = rhs->baseSignal;
@@ -360,7 +361,7 @@ void DataflowEngine::clear()
     signals.clear();
     funcs.clear();
     m_networkModified = false;
-    m_tickCallbacks.clear();
+    m_tickNotifier.clear();
     m_tickStart = TimePoint::zero();
     m_tickPeriod = TimeDuration::zero();
     m_runStart = TimePoint::zero();
@@ -2053,9 +2054,9 @@ std::vector<std::pair<ptr<FuncNode>, std::string>> DataflowEngine::producersOfSi
 
 
 
-void DataflowEngine::addTickCallback(std::function<void(ptr<DataflowEngine>, TimePoint)> callback)
+roxal::Subscription DataflowEngine::subscribeTick(TickNotifier::Callback callback)
 {
-    m_tickCallbacks.push_back(callback);
+    return m_tickNotifier.subscribe(std::move(callback));
 }
 
 
@@ -2145,18 +2146,10 @@ void DataflowEngine::buildNetworkCacheData()
 
 void DataflowEngine::invokeTickCallbacks()
 {
-    for (const auto& callback : m_tickCallbacks) {
-        #ifdef DEBUG_BUILD
-        try {
-            callback(ptr_from_this(), m_tickStart);
-        } catch(const std::exception& e) {
-            std::cerr << "Exception in tick callback " << e.what() << std::endl;
-        }
-        #else
-        try { callback(ptr_from_this(), m_tickStart); } catch(...) {}
-        #endif
-    }
-
+    // Dispatch reads a published snapshot, so a host subscribing or cancelling
+    // from another thread can't race this iteration (it used to push_back into
+    // the vector being walked here).
+    m_tickNotifier.notify(ptr_from_this(), m_tickStart);
 }
 
 

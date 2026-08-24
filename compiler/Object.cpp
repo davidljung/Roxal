@@ -3209,7 +3209,7 @@ void ObjChangeNotifier::read(std::istream& in, roxal::ptr<SerializationContext> 
     uint8_t tag; in.read(reinterpret_cast<char*>(&tag), 1);
     if (tag != static_cast<uint8_t>(ObjType::ChangeNotifier))
         throw std::runtime_error("ObjChangeNotifier::read mismatched tag");
-    notifier.callbacks.clear();
+    notifier.clear();
     type = ObjType::ChangeNotifier;
 }
 
@@ -6168,6 +6168,7 @@ void ObjSignal::trace(ValueVisitor& visitor) const
 void ObjSignal::dropReferences()
 {
     changeEventType = Value::nilVal();
+    changeEventSub.cancel();   // stop emitting into an event type we're releasing
     changeEventSignal.reset();
     changeEventUsesTimeSpan = false;
     // During VM bulk teardown, also release the Signal's buffered time->Value
@@ -6193,7 +6194,11 @@ ObjEventType* ObjSignal::ensureChangeEventType()
             return;
         Value eventWeak = changeEventType.weakRef();
         bool useSpan = changeEventUsesTimeSpan;
-        target->addValueChangedCallback([eventWeak, useSpan](TimePoint t, ptr<df::Signal> sig, const Value& sample){
+        // Assignment cancels any previous registration, so re-targeting to a new
+        // signal stops the old one emitting into this event type.  The GC weak ref
+        // below still guards the in-flight window (a delivery already past the
+        // active check on the engine thread).
+        changeEventSub = target->subscribeValueChanged([eventWeak, useSpan](TimePoint t, ptr<df::Signal> sig, const Value& sample){
             if (!eventWeak.isAlive())
                 return;
             Value eventTypeStrong = eventWeak.strongRef();
@@ -7304,42 +7309,47 @@ Value ObjectInstance::ensurePropertySignal(int32_t nameHash, const std::string& 
 }
 
 // Shared by ObjectInstance and ActorInstance: the observer machinery lives in
-// the MonitoredValue slot, which both kinds of instance use identically.
-static void installSlotObserver(VariablesMap::MonitoredValue& slot,
-                                ChangeNotifier::Callback callback)
+// the MonitoredValue slot, which both kinds of instance use identically.  The
+// caller owns the returned Subscription -- a slot observer survives the upgrade
+// from bare notifier to full signal (the slot is moved, not re-registered), so
+// the handle stays valid across it.
+static Subscription installSlotObserver(VariablesMap::MonitoredValue& slot,
+                                        ChangeNotifier::Callback callback)
 {
     Value& sig = slot.signal;
     if (sig.isNil()) {
         // No signal yet — install a lightweight notifier (no dataflow engine involved).
         auto cn = newChangeNotifierObj();
-        cn->notifier.addCallback(std::move(callback));
+        Subscription sub = cn->notifier.subscribe(std::move(callback));
         sig = Value::objVal(std::move(cn));
+        return sub;
     } else if (isChangeNotifier(sig)) {
-        asChangeNotifier(sig)->notifier.addCallback(std::move(callback));
+        return asChangeNotifier(sig)->notifier.subscribe(std::move(callback));
     } else if (isSignal(sig)) {
         // Property already has a full signal (e.g. used in `when … changes`): attach there.
         ObjSignal* s = asSignal(sig);
         if (s && s->signal)
-            s->signal->addValueChangedCallback(std::move(callback));
+            return s->signal->subscribeValueChanged(std::move(callback));
     }
+    return Subscription();
 }
 
-void ObjectInstance::observePropertyChange(int32_t nameHash, const std::string& name,
-                                           ChangeNotifier::Callback callback)
+Subscription ObjectInstance::observePropertyChange(int32_t nameHash, const std::string& name,
+                                                  ChangeNotifier::Callback callback)
 {
     (void)name;
-    installSlotObserver(propertySlot(nameHash), std::move(callback));  // MVCC-guarded, ensures the slot
+    return installSlotObserver(propertySlot(nameHash), std::move(callback));  // MVCC-guarded, ensures the slot
 }
 
-void ActorInstance::observePropertyChange(int32_t nameHash, const std::string& name,
-                                          ChangeNotifier::Callback callback)
+Subscription ActorInstance::observePropertyChange(int32_t nameHash, const std::string& name,
+                                                 ChangeNotifier::Callback callback)
 {
     (void)name;
     // The callback fires on whichever thread performs the write -- for actor
     // properties that is the ACTOR's thread, so observers must confine
     // themselves to thread-safe work (the web store only records a dirty hash
     // under its own mutex).
-    installSlotObserver(propertySlot(nameHash), std::move(callback));
+    return installSlotObserver(propertySlot(nameHash), std::move(callback));
 }
 
 

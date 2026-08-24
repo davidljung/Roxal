@@ -1346,6 +1346,10 @@ struct ObjSignal : public Obj {
     // Lazily initialized `SignalChanged` event type shared by all emissions.
     Value changeEventType;
     weak_ptr<df::Signal> changeEventSignal;
+    // Registration of the emitter on changeEventSignal.  Held so re-targeting to a
+    // different signal cancels the old one -- otherwise the previous signal keeps
+    // emitting into this same (still-live) event type.
+    Subscription changeEventSub;
     bool changeEventUsesTimeSpan = false;
 
     // Optional callback invoked when signal.stop() is called (for gRPC streaming)
@@ -1379,7 +1383,7 @@ struct ObjChangeNotifier : public Obj {
     ChangeNotifier notifier;
 
     void trace(ValueVisitor& visitor) const override { (void)visitor; }
-    void dropReferences() override { notifier.callbacks.clear(); }
+    void dropReferences() override { notifier.clear(); }
     unique_ptr<Obj, UnreleasedObj> clone(roxal::ptr<CloneContext> ctx) const override;
     void write(std::ostream& out, roxal::ptr<SerializationContext> ctx = nullptr) const override;
     void read(std::istream& in, roxal::ptr<SerializationContext> ctx = nullptr) override;
@@ -2355,8 +2359,8 @@ struct ObjectInstance : public Obj
     // lightweight ObjChangeNotifier in the slot, or attaches to an existing
     // signal/notifier. MVCC-guarded. (The qt module uses this to bind property
     // changes to QML without engaging the dataflow engine.)
-    void observePropertyChange(int32_t nameHash, const std::string& name,
-                               ChangeNotifier::Callback callback);
+    [[nodiscard]] Subscription observePropertyChange(int32_t nameHash, const std::string& name,
+                                                     ChangeNotifier::Callback callback);
 
     unique_ptr<Obj, UnreleasedObj> clone(roxal::ptr<CloneContext> ctx) const override;
     unique_ptr<Obj, UnreleasedObj> shallowClone() const override;
@@ -2458,8 +2462,8 @@ struct ActorInstance : public Obj
     // Same contract as ObjectInstance::observePropertyChange, with one caveat:
     // the callback fires on the writing thread, which for actor properties is
     // the actor's own thread.
-    void observePropertyChange(int32_t nameHash, const std::string& name,
-                               ChangeNotifier::Callback callback);
+    [[nodiscard]] Subscription observePropertyChange(int32_t nameHash, const std::string& name,
+                                                     ChangeNotifier::Callback callback);
 
     // Returns a future resolved with the queued method's result, or nil for proc methods
     Value queueCall(const Value& callee, const CallSpec& callSpec, Value* argsStackTop,

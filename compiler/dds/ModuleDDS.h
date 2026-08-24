@@ -136,6 +136,9 @@ private:
                           const void* sample,
                           Value typeVal);
     void deleteEntityOnce(dds_entity_t ent);
+    void dropWriterSubs(const std::vector<uint64_t>& subIds);
+    void dropAllWriterSubs();
+    std::vector<uint64_t> writerSubsUnder(dds_entity_t ent);
 
     // Signal bindings
     Value createWriterSignal(const Value& writerVal, const Value& initial);
@@ -157,6 +160,11 @@ private:
         // drained batch to the newest sample; keep_all -> deliver every
         // sample in order).
         dds_history_kind_t historyKind{DDS_HISTORY_KEEP_LAST};
+        // Identifies this binding's entry in writerSubs (writer bindings only; 0
+        // for readers, which register no callback).  Keyed per BINDING rather than
+        // per entity because one writer can back several writer signals -- keying
+        // on the entity would let one signal's teardown cancel its siblings.
+        uint64_t subId{0};
     };
     static void traceSignalBindings(ValueVisitor& visitor,
                                     const std::vector<SignalBinding>& bindings)
@@ -166,6 +174,13 @@ private:
                 visitor.visit(binding.signal);
     }
     TracedMember<std::vector<SignalBinding>> writerSignals { &ModuleDDS::traceSignalBindings };
+    // Writer-signal change registrations, keyed by SignalBinding::subId and guarded
+    // by signalMutex.  Kept out of SignalBinding because Subscription is move-only
+    // and bindings are copied (snapshotted) by the reader thread.  Drained before
+    // the entity is deleted so no delivery can still be inside dds_write() on a
+    // handle Cyclone is about to free and recycle.
+    std::unordered_map<uint64_t, Subscription> writerSubs;
+    uint64_t nextSubId{1};   // guarded by signalMutex
     TracedMember<std::vector<SignalBinding>> readerSignals { &ModuleDDS::traceSignalBindings };
     std::atomic<bool> readerThreadRunning{false};
     std::thread readerThread;

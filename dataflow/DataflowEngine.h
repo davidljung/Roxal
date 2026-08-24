@@ -144,8 +144,21 @@ public:
     std::vector<std::pair<ptr<FuncNode>, std::string>> producersOfSignal(ptr<Signal> signal) const;
 
 
-    // callback for each engine tick (who's period is the GCD of all clock signals). Called after all signal value for this tick have been computed.
-    void addTickCallback(std::function<void(ptr<DataflowEngine>, TimePoint)> callback);
+    // Callback for each engine tick (whose period is the GCD of all clock signals),
+    // called after all signal values for this tick have been computed.  The returned
+    // handle cancels on destruction; see core/CallbackRegistry.h for the contract.
+    using TickNotifier = roxal::CallbackRegistry<ptr<DataflowEngine>, TimePoint>;
+
+    [[nodiscard]] roxal::Subscription subscribeTick(TickNotifier::Callback callback);
+
+    // Preferred for a ptr<>-managed host: `owner` is held alive across each tick
+    // delivery and the subscription self-prunes once the owner is gone.
+    template<class Owner>
+    [[nodiscard]] roxal::Subscription subscribeTick(const ptr<Owner>& owner,
+                                                    TickNotifier::Callback callback)
+    {
+        return m_tickNotifier.subscribe(owner, std::move(callback));
+    }
 
     std::string graph() const;
 
@@ -273,7 +286,7 @@ private:
 
     // of start of current tick (ticks occur at GCD of all clock signals)
     std::atomic<TimePoint> m_tickStart;
-    std::vector<std::function<void(ptr<DataflowEngine>, TimePoint)>> m_tickCallbacks;
+    TickNotifier m_tickNotifier;
 
     // rebuild pre-computed network information (call after network changes - Func/Signal addition/removal/modification)
     void buildNetworkCacheData();

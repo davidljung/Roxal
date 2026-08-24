@@ -156,11 +156,11 @@ Value VariablesMap::MonitoredValue::ensureSignal(const std::string& signalName)
     // Upgrade: if a lightweight ChangeNotifier was already observing this property
     // (e.g. a C++ binding), migrate its observers onto the new signal so they keep
     // firing once the property also becomes a Roxal signal (`when … changes`).
+    // The slots move intact, so observers' Subscriptions stay valid across the
+    // upgrade -- they reference the slot, not the notifier it currently sits in.
     if (!signal.isNil() && isChangeNotifier(signal)) {
         ObjChangeNotifier* cn = asChangeNotifier(signal);
-        for (auto& cb : cn->notifier.callbacks)
-            sig->addValueChangedCallback(std::move(cb));
-        cn->notifier.callbacks.clear();
+        sig->adoptValueChangedFrom(cn->notifier);
     }
 
     signal = Value::signalVal(sig);

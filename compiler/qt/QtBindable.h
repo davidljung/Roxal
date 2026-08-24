@@ -78,7 +78,8 @@ private:
     Value obj_;                                   // wrapped ObjectInstance (traced by hub)
     std::vector<Role> roles_;
     std::vector<ustring> methodNames_;            // public methods exposed as callable values
-    std::shared_ptr<std::atomic<bool>> alive_;    // guards signal callbacks past destruction
+    std::shared_ptr<std::atomic<bool>> alive_;    // guards late METHOD-bridge calls past destruction
+    std::vector<Subscription> subs_;              // property-change registrations, drained in the dtor
     QString suppressKey_;                         // re-entrancy guard during a QML write
     std::unique_ptr<RoxalMethodBridge> bridge_;   // dynamic QObject for QML→method dispatch
     bool methodsInstalled_ { false };

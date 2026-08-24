@@ -1,0 +1,45 @@
+# Two writer signals bound to the SAME writer must both keep publishing.
+# Each signal's change subscription is keyed per binding, not per writer entity:
+# keying by entity let the second binding cancel the first, and the first signal
+# then went silent.
+import HelloWorldData
+import dds
+import sys
+
+qos = {'reliability': 'reliable', 'history': {'kind': 'keep_all'}}
+p = dds.create_participant()
+rsig = dds.reader_signal('ws_shared', HelloWorldData.Msg, p, qos)
+
+var got = 0
+var msgs = ""
+when rsig changes as evt:
+  got = got + 1
+  msgs = msgs + " " + evt.value.message
+
+t = dds.create_topic(p, 'ws_shared', HelloWorldData.Msg, qos)
+w = dds.create_writer(p, t, qos)
+
+first = dds.create_writer_signal(w)
+second = dds.create_writer_signal(w)
+
+var a = HelloWorldData.Msg()
+a.userID = 1
+a.message = "from_first"
+first.set(a)
+
+var tries = 0
+while got < 1 and tries < 600:
+  sys.wait(5ms)
+  tries = tries + 1
+
+var b = HelloWorldData.Msg()
+b.userID = 2
+b.message = "from_second"
+second.set(b)
+
+var tries2 = 0
+while got < 2 and tries2 < 600:
+  sys.wait(5ms)
+  tries2 = tries2 + 1
+
+print("received{msgs}")

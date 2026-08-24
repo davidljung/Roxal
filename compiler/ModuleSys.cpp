@@ -2256,6 +2256,10 @@ Value ModuleSys::invoke_method_builtin(VM& vm, ArgsView args)
 // Test-only counters for the ChangeNotifier path (driven by _watch_property/_watch_count).
 // Each entry is a small shared counter captured by the property's change callback.
 static std::vector<std::shared_ptr<std::atomic<int>>> s_watchCounters;
+// Parallel to s_watchCounters: keeps each watch registered for as long as its
+// counter is readable (there is no _unwatch_property yet -- when there is, it
+// cancels the entry here).
+static std::vector<Subscription> s_watchSubs;
 
 Value ModuleSys::watch_property_builtin(VM& vm, ArgsView args)
 {
@@ -2270,10 +2274,10 @@ Value ModuleSys::watch_property_builtin(VM& vm, ArgsView args)
     s_watchCounters.push_back(counter);
 
     // Observe via the lightweight ChangeNotifier (no dataflow signal is created).
-    obj->observePropertyChange(name.hashCode(), toUTF8StdString(name),
+    s_watchSubs.push_back(obj->observePropertyChange(name.hashCode(), toUTF8StdString(name),
         [counter](TimePoint, ptr<df::Signal>, const Value&) {
             counter->fetch_add(1, std::memory_order_relaxed);
-        });
+        }));
     return Value(id);
 }
 

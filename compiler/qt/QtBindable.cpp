@@ -101,7 +101,12 @@ RoxalPropertyMap::RoxalPropertyMap(const Value& obj)
 
 RoxalPropertyMap::~RoxalPropertyMap()
 {
-    *alive_ = false;   // any late signal callback becomes a no-op
+    // Drain, don't just cancel: a property write can come from an actor's own
+    // thread, so a delivery may already be inside onRoxalChange().  alive_ stays
+    // for the method bridge, which has its own late-call path.
+    for (auto& sub : subs_)
+        sub.cancelAndDrain();
+    *alive_ = false;   // any late method-bridge call becomes a no-op
 }
 
 void RoxalPropertyMap::buildRoles()
@@ -238,7 +243,6 @@ void RoxalPropertyMap::hookSignals()
 {
     if (!isObjectInstance(obj_)) return;
     ObjectInstance* inst = asObjectInstance(obj_);
-    std::shared_ptr<std::atomic<bool>> alive = alive_;
     RoxalPropertyMap* self = this;
     for (const auto& r : roles_) {
         // Observe the property's changes via the lightweight ChangeNotifier — binding an
@@ -254,11 +258,12 @@ void RoxalPropertyMap::hookSignals()
         const int32_t observeHash = role.computed ? role.backingHash : role.nameHash;
         const ustring observeName =
             role.computed ? (ustring("_") + role.uname) : role.uname;
-        inst->observePropertyChange(observeHash, toUTF8StdString(observeName),
-            [alive, self, role](TimePoint, ptr<df::Signal>, const Value&) {
-                if (!alive->load()) return;   // wrapper destroyed → ignore
+        // `self` stays valid for the whole delivery: the destructor drains every
+        // subscription before returning.
+        subs_.push_back(inst->observePropertyChange(observeHash, toUTF8StdString(observeName),
+            [self, role](TimePoint, ptr<df::Signal>, const Value&) {
                 self->onRoxalChange(role);
-            });
+            }));
     }
 }
 

@@ -70,7 +70,26 @@ public:
     ptr<Signal> derivedBase() const { return baseSignal.lock(); }
     int derivedIndex() const { return baseIndex; }
 
-    void addValueChangedCallback(std::function<void(TimePoint, ptr<Signal>,const Value&)> callback);
+    // Observe value changes.  The returned handle cancels on destruction, so a
+    // callback outliving its subscriber has to be spelled out with detach();
+    // see core/CallbackRegistry.h for the subscribe/cancel contract.
+    [[nodiscard]] roxal::Subscription subscribeValueChanged(roxal::ChangeNotifier::Callback callback);
+
+    // Preferred for a ptr<>-managed observer: `owner` is held alive across each
+    // delivery (so it can't be destroyed mid-callback) and the subscription
+    // self-prunes once the owner is gone.
+    template<class Owner>
+    [[nodiscard]] roxal::Subscription subscribeValueChanged(const ptr<Owner>& owner,
+                                                            roxal::ChangeNotifier::Callback callback)
+    {
+        return m_changeNotifier.subscribe(owner, std::move(callback));
+    }
+
+    // Move every value-change observer from `other` onto this signal.  Outstanding
+    // Subscriptions stay valid -- they reference the slot, not the list -- which is
+    // what lets a property's observers survive being upgraded from a bare notifier
+    // to a full signal, or two signals being merged.
+    void adoptValueChangedFrom(roxal::ChangeNotifier& other) { other.transferTo(m_changeNotifier); }
 
     void trace(roxal::ValueVisitor& visitor) const;
 

@@ -81,7 +81,10 @@ private:
     std::string name_;
     std::vector<Role> roles_;
     std::vector<ustring> methodNames_;
-    std::shared_ptr<std::atomic<bool>> alive_;    // guards callbacks past destruction
+    // Change-observer registrations, drained in ~RoxalStore: a store replaced by a
+    // script re-run must stop observing signals that outlive it, and must not be
+    // freed while an engine-thread delivery is still inside onRoxalChange().
+    std::vector<Subscription> subs_;
     // Guarded: a signal-valued role is marked dirty from the DATAFLOW ENGINE
     // thread, not the VM thread. Only role hashes cross that boundary -- no VM
     // state -- but the container itself still needs a lock.

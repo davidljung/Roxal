@@ -70,7 +70,7 @@ Value bindActorMethod(const Value& actorVal, const ustring& methodName)
 // ============================================================
 
 RoxalStore::RoxalStore(std::string name, const Value& obj)
-    : obj_(obj), name_(std::move(name)), alive_(std::make_shared<std::atomic<bool>>(true))
+    : obj_(obj), name_(std::move(name))
 {
     buildRoles();
     buildMethods();
@@ -79,7 +79,13 @@ RoxalStore::RoxalStore(std::string name, const Value& obj)
 
 RoxalStore::~RoxalStore()
 {
-    *alive_ = false;   // any late change callback becomes a no-op
+    // Drain rather than plain cancel: a signal-valued role is delivered on the
+    // dataflow engine thread, so a delivery could already be past the active
+    // check and inside onRoxalChange() while we're being destroyed.  Neither the
+    // callback nor this destructor holds a lock the other wants, so the wait is
+    // bounded by one dirtyMutex_ insert.
+    for (auto& sub : subs_)
+        sub.cancelAndDrain();
 }
 
 void RoxalStore::buildRoles()
@@ -169,7 +175,6 @@ Value RoxalStore::readRole(const Role& role) const
 void RoxalStore::hookChanges()
 {
     if (!isExposable(obj_)) return;
-    std::shared_ptr<std::atomic<bool>> alive = alive_;
     RoxalStore* self = this;
 
     for (const auto& r : roles_) {
@@ -185,17 +190,18 @@ void RoxalStore::hookChanges()
         Role role = r;
         const int32_t observeHash = role.computed ? role.backingHash : role.nameHash;
         const ustring observeName = role.computed ? (ustring("_") + role.uname) : role.uname;
-        auto onChange = [alive, self, role](TimePoint, ptr<df::Signal>, const Value&) {
-            if (!alive->load()) return;
+        // `self` stays valid for the whole delivery: ~RoxalStore drains every
+        // subscription before returning, so no callback can still be running.
+        auto onChange = [self, role](TimePoint, ptr<df::Signal>, const Value&) {
             self->onRoxalChange(role);
         };
         // For an actor this callback arrives on the ACTOR's thread (writes happen
         // there); onRoxalChange only records a hash under dirtyMutex_, which is
         // the same contract the engine-thread signal callback below relies on.
         if (isActorInstance(obj_))
-            asActorInstance(obj_)->observePropertyChange(observeHash, toUTF8StdString(observeName), onChange);
+            subs_.push_back(asActorInstance(obj_)->observePropertyChange(observeHash, toUTF8StdString(observeName), onChange));
         else
-            asObjectInstance(obj_)->observePropertyChange(observeHash, toUTF8StdString(observeName), onChange);
+            subs_.push_back(asObjectInstance(obj_)->observePropertyChange(observeHash, toUTF8StdString(observeName), onChange));
 
         // A signal-valued property needs a SECOND hook. The property slot holds the
         // same ObjSignal for the object's whole life -- the value changes inside the
@@ -209,11 +215,10 @@ void RoxalStore::hookChanges()
         // later, on the VM thread, by flushDirty().
         const Value current = readRole(r);
         if (isSignal(current)) {
-            asSignal(current)->signal->addValueChangedCallback(
-                [alive, self, role](TimePoint, ptr<df::Signal>, const Value&) {
-                    if (!alive->load()) return;
+            subs_.push_back(asSignal(current)->signal->subscribeValueChanged(
+                [self, role](TimePoint, ptr<df::Signal>, const Value&) {
                     self->onRoxalChange(role);
-                });
+                }));
         }
     }
 }
@@ -483,8 +488,9 @@ RoxalStore* WebStoreHub::expose(const std::string& name, const Value& obj)
 
         // Different object under the same name -- an edited script re-run. Replace
         // it: reusing the old object would silently ignore the user's edit, which
-        // is the worst possible behaviour in a live editor. The old store's alive_
-        // flag drops, so its pending callbacks become no-ops.
+        // is the worst possible behaviour in a live editor. Destroying the old
+        // store cancels its observers, so re-runs no longer pile up dead
+        // callbacks on signals that outlive them.
         RoxalStore* stale = it->second;
         auto& all = *impl_->stores;
         all.erase(std::remove_if(all.begin(), all.end(),

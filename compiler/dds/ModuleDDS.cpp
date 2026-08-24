@@ -65,6 +65,7 @@ void ModuleDDS::onModuleUnloading(VM& vm)
     // (ASan/teardown-SEGV confirmed via TopicSupport::handle).  The reader
     // thread is stopped first -- it consults these maps.
     stopReaderThread();
+    dropAllWriterSubs();         // cancel every writer-signal registration
     writerSignals->clear();
     readerSignals->clear();
     supportByType->clear();
@@ -1275,12 +1276,18 @@ void ModuleDDS::registerWriterSignal(const Value& sigVal, const Value& writerVal
     auto support = lookupSupport(writerVal);
     auto desc = support ? support->descriptor : nullptr;
     std::lock_guard<std::mutex> lock(signalMutex);
-    writerSignals->push_back({sigVal.weakRef(), writer, typeName, desc});
+    const uint64_t subId = nextSubId++;
+    writerSignals->push_back({sigVal.weakRef(), writer, typeName, desc,
+                              DDS_HISTORY_KEEP_LAST, subId});
     if (isSignal(sigVal)) {
         ObjSignal* objSig = asSignal(sigVal);
         auto sig = objSig->signal;
         std::shared_ptr<dds_topic_descriptor_t> descHold = desc;
-        sig->addValueChangedCallback([this, writer, typeName, descHold](TimePoint, ptr<df::Signal>, const Value& sampleVal){
+        // One entry per binding: several writer signals may share a writer, and
+        // each must keep publishing until its own binding goes.  The handle is
+        // dropped (and drained) when this binding is unregistered or the writer's
+        // entity -- or a container of it -- is deleted.
+        writerSubs.emplace(subId, sig->subscribeValueChanged([this, writer, typeName, descHold](TimePoint, ptr<df::Signal>, const Value& sampleVal){
             if (writer <= 0)
                 return;
             auto info = findStructInfo(typeName);
@@ -1306,7 +1313,7 @@ void ModuleDDS::registerWriterSignal(const Value& sigVal, const Value& writerVal
             if (rc < 0) {
                 fprintf(stderr, "dds_write signal error: %s\n", dds_strretcode(-rc));
             }
-        });
+        }));
     }
 }
 
@@ -1430,16 +1437,21 @@ void ModuleDDS::registerReaderSignal(const Value& sigVal, const Value& readerVal
 
 void ModuleDDS::unregisterSignal(const Value& sigVal)
 {
+    std::vector<uint64_t> droppedSubs;
     {
         std::lock_guard<std::mutex> lock(signalMutex);
-        auto prune = [&](std::vector<SignalBinding>& vec) {
+        auto prune = [&](std::vector<SignalBinding>& vec, bool writers) {
             vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const SignalBinding& b){
-                return !b.signal.isAlive() || b.signal == sigVal || b.signal.strongRef() == sigVal;
+                bool drop = !b.signal.isAlive() || b.signal == sigVal || b.signal.strongRef() == sigVal;
+                if (drop && writers)
+                    droppedSubs.push_back(b.subId);   // this binding only, not the writer's others
+                return drop;
             }), vec.end());
         };
-        prune(writerSignals);
-        prune(readerSignals);
+        prune(writerSignals, true);
+        prune(readerSignals, false);
     }
+    dropWriterSubs(droppedSubs);
     readerBindingsChanged.store(true);
     wakeReaderThread();
 }
@@ -2029,14 +2041,120 @@ Value ModuleDDS::valueFromSample(const StructInfo& info,
     return inst;
 }
 
+// Drop the named writer-signal registrations.  The subscriptions are moved out
+// from under signalMutex and drained only after it is released: a drain can block
+// on a delivery running on another thread, and blocking while holding a lock that
+// delivery might want is how this deadlocks.
+void ModuleDDS::dropWriterSubs(const std::vector<uint64_t>& subIds)
+{
+    if (subIds.empty())
+        return;
+    std::vector<Subscription> doomed;
+    {
+        std::lock_guard<std::mutex> lock(signalMutex);
+        for (uint64_t id : subIds) {
+            auto it = writerSubs.find(id);
+            if (it != writerSubs.end()) {
+                doomed.push_back(std::move(it->second));
+                writerSubs.erase(it);
+            }
+        }
+    }
+    for (auto& sub : doomed)
+        sub.cancelAndDrain();
+}
+
+// Module teardown: every registration goes.
+void ModuleDDS::dropAllWriterSubs()
+{
+    std::vector<Subscription> doomed;
+    {
+        std::lock_guard<std::mutex> lock(signalMutex);
+        for (auto& entry : writerSubs)
+            doomed.push_back(std::move(entry.second));
+        writerSubs.clear();
+    }
+    for (auto& sub : doomed)
+        sub.cancelAndDrain();
+}
+
+// Registrations for writers at or below `ent`.  Deleting a DDS entity recursively
+// deletes the ones it contains -- deleting a participant takes its publishers and
+// their writers with it -- so an exact handle match would leave those writers'
+// callbacks live, publishing into freed (and possibly recycled) handles.  Must be
+// called while `ent` and its descendants are still resolvable, i.e. before
+// dds_delete.  The parent chain is writer -> publisher -> participant; the cap is
+// only a guard against a malformed chain.
+std::vector<uint64_t> ModuleDDS::writerSubsUnder(dds_entity_t ent)
+{
+    std::vector<uint64_t> subIds;
+    std::lock_guard<std::mutex> lock(signalMutex);
+    for (const auto& binding : *writerSignals) {
+        if (binding.subId == 0 || writerSubs.find(binding.subId) == writerSubs.end())
+            continue;
+        dds_entity_t node = binding.entity;
+        for (int depth = 0; node > 0 && depth < 8; ++depth) {
+            if (node == ent) {
+                subIds.push_back(binding.subId);
+                break;
+            }
+            node = dds_get_parent(node);   // <= 0 at the participant, or on error
+        }
+    }
+    return subIds;
+}
+
+// Append every descendant of `ent`, depth-first.  Cyclone reports a participant's
+// implicit publisher/subscriber as its children and the writers/readers one level
+// below those, so this has to recurse; the cap only guards a malformed chain.
+static void collectDescendants(dds_entity_t ent, std::vector<dds_entity_t>& out, int depth = 0)
+{
+    if (ent <= 0 || depth > 6)
+        return;
+    dds_return_t count = ::dds_get_children(ent, nullptr, 0);
+    if (count <= 0)
+        return;
+    std::vector<dds_entity_t> children(static_cast<size_t>(count));
+    count = ::dds_get_children(ent, children.data(), children.size());
+    if (count <= 0)
+        return;
+    children.resize(std::min(children.size(), static_cast<size_t>(count)));
+    for (dds_entity_t child : children) {
+        if (child <= 0)
+            continue;
+        out.push_back(child);
+        collectDescendants(child, out, depth + 1);
+    }
+}
+
 void ModuleDDS::deleteEntityOnce(dds_entity_t ent)
 {
     if (ent <= 0)
         return;
-    std::lock_guard<std::mutex> lock(gEntityMutex);
-    if (gDeletedEntities.find(ent) != gDeletedEntities.end())
-        return;
-    gDeletedEntities.insert(ent);
+    {
+        std::lock_guard<std::mutex> lock(gEntityMutex);
+        if (gDeletedEntities.find(ent) != gDeletedEntities.end())
+            return;
+        gDeletedEntities.insert(ent);
+    }
+    // Stop (and wait out) any signal-driven write before the handles go away -- a
+    // delivery already past the gate would otherwise dds_write() into a deleted,
+    // possibly recycled entity.
+    dropWriterSubs(writerSubsUnder(ent));
+
+    // Cyclone deletes an entity's whole subtree with it, but only `ent` itself was
+    // recorded above.  Record the descendants too, while they are still walkable:
+    // otherwise a later dds.close() on a child -- close(participant) then
+    // close(writer) is a perfectly ordinary script -- passes the deleted-entity
+    // guard and calls dds_delete on a handle Cyclone has already freed, and may by
+    // then have reissued to an unrelated entity.
+    std::vector<dds_entity_t> descendants;
+    collectDescendants(ent, descendants);
+    if (!descendants.empty()) {
+        std::lock_guard<std::mutex> lock(gEntityMutex);
+        gDeletedEntities.insert(descendants.begin(), descendants.end());
+    }
+
     dds_delete(ent);
 }
 

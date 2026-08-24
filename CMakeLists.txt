@@ -723,6 +723,12 @@ add_executable(roxal_ustring_test core/ustring_test.cpp)
 target_link_libraries(roxal_ustring_test PRIVATE roxal_abi ${ROXAL_UNICODE_LIBRARIES})
 add_test(NAME RoxalUString COMMAND roxal_ustring_test)
 
+# Subscribe/cancel/drain contract of the shared callback registry (df::Signal
+# change callbacks, DataflowEngine tick callbacks, bare property observers).
+add_executable(roxal_callback_registry_test core/CallbackRegistry_test.cpp)
+target_link_libraries(roxal_callback_registry_test PRIVATE roxal_abi pthread)
+add_test(NAME RoxalCallbackRegistry COMMAND roxal_callback_registry_test)
+
 # Build the static library containing the core compiler and VM
 add_library(roxalcore STATIC ${CORE_SOURCES} ${COMPILER_SOURCES} ${GENERATED_SOURCES})
 set_target_properties(roxalcore PROPERTIES OUTPUT_NAME roxal)

@@ -120,9 +120,9 @@ Signal::Signal(double freq, Value initial, std::optional<std::string> name)
 }
 
 
-void Signal::addValueChangedCallback(std::function<void(TimePoint, ptr<Signal>, const Value&)> callback)
+roxal::Subscription Signal::subscribeValueChanged(roxal::ChangeNotifier::Callback callback)
 {
-    m_changeNotifier.addCallback(std::move(callback));
+    return m_changeNotifier.subscribe(std::move(callback));
 }
 
 
