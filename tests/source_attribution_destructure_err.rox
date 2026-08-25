@@ -1,0 +1,4 @@
+// Validating the LHS after compiling the RHS must still blame the bad target.
+[123] = (
+  [456]
+)

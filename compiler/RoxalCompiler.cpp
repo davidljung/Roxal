@@ -84,7 +84,7 @@ static unsigned long currentProcessId()
     return static_cast<unsigned long>(::getpid());
 #endif
 }
-constexpr std::uint32_t ModuleCacheVersion = 59;   // 59: module record carries declAnnotations (annotations on top-level var/const/type declarations)
+constexpr std::uint32_t ModuleCacheVersion = 60;   // 60: scoped AST attribution changes serialized Chunk line/column tables
 
 std::filesystem::path moduleCachePathFor(const std::filesystem::path& sourcePath) {
     if (sourcePath.empty())
@@ -961,7 +961,7 @@ ASTVisitor::TraversalOrder RoxalCompiler::traversalOrder() const
 
 std::any RoxalCompiler::visit(ptr<ast::File> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     Anys results {};
 
     // Hoist top-level type declarations: emit "create empty placeholder type
@@ -977,6 +977,7 @@ std::any RoxalCompiler::visit(ptr<ast::File> ast)
         auto typeDecl = dynamic_ptr_cast<ast::TypeDecl>(std::get<ptr<Declaration>>(declOrStmt));
         if (!typeDecl)
             continue;
+        SourceNodeScope typeDeclSource(*this, typeDecl);
         uint16_t typeNameConstant = identifierConstant(typeDecl->name);
         OpCode op = OpCode::ObjectType;
         switch (typeDecl->kind) {
@@ -1032,7 +1033,6 @@ std::any RoxalCompiler::visit(ptr<ast::File> ast)
                 auto it = topLevelNode.find(typeDecl.get());
                 if (it != topLevelNode.end())
                     emitForwardTypeRelink(linkNodes, it->second);
-                currentNode = ast;
             }
         }
         else if (std::holds_alternative<ptr<Statement>>(declOrStmt))
@@ -1295,10 +1295,9 @@ void RoxalCompiler::emitForwardTypeRelink(const std::vector<TypeLinkNode>& nodes
     for (size_t n : dependents)
         visitNode(n);
 
-    auto savedNode = currentNode;
     for (size_t n : order) {
         const auto& node = nodes[n];
-        currentNode = node.decl;      // line attribution (and any conformance error) to this declaration
+        SourceNodeScope nodeSource(*this, node.decl);
         std::string who = toUTF8StdString(joinTypeName(node.qualifiedName));
         if (node.extendsNode.has_value()) {
             emitTypeName(nodes[*node.extendsNode].qualifiedName);           // super
@@ -1323,13 +1322,12 @@ void RoxalCompiler::emitForwardTypeRelink(const std::vector<TypeLinkNode>& nodes
             }
         }
     }
-    currentNode = savedNode;
 }
 
 
 std::any RoxalCompiler::visit(ptr<ast::SingleInput> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     Anys results {};
     ast->acceptChildren(*this, results);
     return results;
@@ -1338,7 +1336,7 @@ std::any RoxalCompiler::visit(ptr<ast::SingleInput> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Annotation> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     // currently, we don't generate any code for annotations
     //ast->acceptChildren(*this);
     return {};
@@ -1348,7 +1346,7 @@ std::any RoxalCompiler::visit(ptr<ast::Annotation> ast)
 std::any RoxalCompiler::visit(ptr<ast::Import> ast)
 {
 
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // search the module paths (as package component roots)
     //  for the specified module
@@ -1779,7 +1777,7 @@ std::any RoxalCompiler::visit(ptr<ast::Import> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // Ahead of the Event early-return below, so every kind of type declaration
     // retains its annotations.  @cstruct keeps its own lowered form further
@@ -1810,7 +1808,7 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
         if (asFuncScope(funcScope())->scopeDepth == 0) {
             auto moduleScopePtr = asModuleScope(moduleScope());
             ObjModuleType* moduleTypeObj = asModuleType(moduleScopePtr->moduleType);
-            moduleScopePtr->moduleConstLines[ast->name] = currentNode->interval.first;
+            moduleScopePtr->moduleConstLines[ast->name] = currentNode()->interval.first;
             moduleTypeObj->constVars.insert(ast->name.hashCode());
         } else {
             asFuncScope(funcScope())->locals.back().isConst = true;
@@ -1831,7 +1829,7 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
         namedVariable(ast->name, false);
 
         for (const auto& prop : ast->properties) {
-            currentNode = prop;
+            SourceNodeScope propertySource(*this, prop);
             if (prop->access == Access::Private)
                 error("Event payload member '" + toUTF8StdString(prop->name) + "' cannot be private");
 
@@ -1935,7 +1933,7 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
         if (asFuncScope(funcScope())->scopeDepth == 0) {
             auto moduleScopePtr = asModuleScope(moduleScope());
             ObjModuleType* moduleTypeObj = asModuleType(moduleScopePtr->moduleType);
-            moduleScopePtr->moduleConstLines[ast->name] = currentNode->interval.first;
+            moduleScopePtr->moduleConstLines[ast->name] = currentNode()->interval.first;
             moduleTypeObj->constVars.insert(ast->name.hashCode());
         } else {
             asFuncScope(funcScope())->locals.back().isConst = true;
@@ -2049,7 +2047,7 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
     for(size_t i=0; i<ast->properties.size(); i++) {
 
         ptr<VarDecl> prop { ast->properties.at(i) };
-        currentNode = prop;
+        SourceNodeScope propertySource(*this, prop);
 
         // In an interface:
         //   `const X :T = <literal>` → concrete static const inherited by implementers
@@ -2215,7 +2213,7 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
     // Compile property accessors (with implicit backing fields) BEFORE regular methods
     // This ensures getter/setter method names are registered before methods that might access them
     for (const auto& propAccessor : ast->propertyAccessors) {
-        currentNode = propAccessor;
+        SourceNodeScope accessorSource(*this, propAccessor);
         auto enclosingModuleScope = asModuleScope(moduleScope());
 
         // Property accessor names cannot start with '_' (reserved for backing fields)
@@ -2610,7 +2608,6 @@ std::any RoxalCompiler::visit(ptr<ast::TypeDecl> ast)
 
     // Emit Implements opcodes -- AFTER methods/properties have been registered
     // on the type, so the runtime conformance check sees the full method set.
-    currentNode = ast;
     for (const auto& ifaceName : ast->implements) {
         emitTypeName(ifaceName);                   // push interface type
         // Push implementer. Dup would duplicate the iface just pushed above,
@@ -2682,7 +2679,8 @@ void RoxalCompiler::checkAnnotationArgs(const std::vector<ptr<ast::Annotation>>&
                 continue;
             // Annotation nodes carry no source interval, so report against the
             // declaration they are attached to.
-            currentNode = (annot->interval.first.line > 0) ? ptr<ast::AST>(annot) : location;
+            SourceNodeScope annotationSource(
+                *this, (annot->interval.first.line > 0) ? ptr<ast::AST>(annot) : location);
             error("annotation @" + toUTF8StdString(annot->name)
                   + " argument must be a literal: a number, string, bool, nil, "
                     "a list or dict of those, a negated number, a suffixed "
@@ -2717,7 +2715,7 @@ void RoxalCompiler::recordDeclAnnotations(const ustring& name,
 
 std::any RoxalCompiler::visit(ptr<ast::FuncDecl> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     auto func {as<Function>(ast->func) };
     assert(func->name.has_value()); // func declarations must have names
@@ -2873,7 +2871,7 @@ std::any RoxalCompiler::visit(ptr<ast::FuncDecl> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::VarDecl> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // Retain the declaration's annotations before the branching below: this
     // visit has four module-scope exits (declaring destructure, compile-time
@@ -3038,8 +3036,8 @@ std::any RoxalCompiler::visit(ptr<ast::VarDecl> ast)
                 error("A const with this name already exists in this scope (previously declared at line " + std::to_string(constIt->second.line) + ").");
             ObjModuleType* moduleTypeObj = asModuleType(module->moduleType);
             moduleTypeObj->constVars.insert(ast->name.hashCode());
-            module->moduleConstLines[ast->name] = currentNode->interval.first;
-            module->moduleVarLines[ast->name] = currentNode->interval.first;
+            module->moduleConstLines[ast->name] = currentNode()->interval.first;
+            module->moduleVarLines[ast->name] = currentNode()->interval.first;
             if (declType.has_value())
                 module->moduleVarTypes[ast->name] = declType.value();
             var = identifierConstant(ast->name);
@@ -3141,6 +3139,7 @@ std::any RoxalCompiler::visit(ptr<ast::VarDecl> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::PropertyAccessor> ast)
 {
+    SourceNodeScope sourceScope(*this, ast);
     // TODO: Implement in Phase 6 - generate code for property accessors
     // For now, just return empty so compilation succeeds
     return {};
@@ -3149,7 +3148,7 @@ std::any RoxalCompiler::visit(ptr<ast::PropertyAccessor> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Suite> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     Anys results {};
 
     enterLocalScope();
@@ -3219,7 +3218,7 @@ void RoxalCompiler::emitRemoteActorConstructorCall(const ptr<ast::Call>& callAst
     if (!callAst->callable->type.has_value() || callAst->callable->type.value()->builtin != BuiltinType::Actor)
         error("Remote calls require an actor constructor expression.");
 
-    currentNode = callAst;
+    SourceNodeScope callSource(*this, callAst);
     CallSpec callSpec = buildCallSpec(callAst);
 
     callAst->callable->accept(*this); // actor type
@@ -3241,7 +3240,7 @@ void RoxalCompiler::emitRemoteActorConstructorCall(const ptr<ast::Call>& callAst
 
 std::any RoxalCompiler::visit(ptr<ast::ExpressionStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     ast::Anys results {};
     if (ast->atHost.has_value()) {
         auto callAst = dynamic_ptr_cast<ast::Call>(ast->expr);
@@ -3361,7 +3360,7 @@ void RoxalCompiler::emitReturnTypeConversion()
 
 std::any RoxalCompiler::visit(ptr<ast::ReturnStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     ast::Anys results {};
 
     // Compile-time fast path: 'return [a, b]' with a declared multi-return.
@@ -3437,7 +3436,7 @@ void RoxalCompiler::emitPopsForLoopExit(int targetDepth)
 
 std::any RoxalCompiler::visit(ptr<ast::BreakStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     if (loopStack.empty()) {
         error("'break' outside of a loop");
         return {};
@@ -3452,7 +3451,7 @@ std::any RoxalCompiler::visit(ptr<ast::BreakStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::ContinueStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     if (loopStack.empty()) {
         error("'continue' outside of a loop");
         return {};
@@ -3474,7 +3473,7 @@ std::any RoxalCompiler::visit(ptr<ast::ContinueStatement> ast)
 // 'label <name>': record a jump target and resolve any forward jumps to it.
 std::any RoxalCompiler::visit(ptr<ast::LabelStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     auto fs = asFuncScope(funcScope());
 
     for (const auto& l : fs->labels) {
@@ -3561,7 +3560,7 @@ void RoxalCompiler::checkUnresolvedJumps()
 // 'jump <name>': transfer control to the matching 'label <name>'.
 std::any RoxalCompiler::visit(ptr<ast::JumpStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     auto fs = asFuncScope(funcScope());
 
     const FunctionScope::LabelInfo* target = nullptr;
@@ -3607,7 +3606,7 @@ std::any RoxalCompiler::visit(ptr<ast::JumpStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::IfStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // (first) if condition
     ast->conditionalSuites.at(0).first->accept(*this);
@@ -3646,7 +3645,7 @@ std::any RoxalCompiler::visit(ptr<ast::IfStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::WhileStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     auto loopStart = currentChunk()->code.size();
 
@@ -3682,7 +3681,7 @@ std::any RoxalCompiler::visit(ptr<ast::WhileStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::ForStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     #ifdef DEBUG_BUILD
     emitByte(OpCode::Nop, "for scope");
@@ -3718,7 +3717,7 @@ std::any RoxalCompiler::visit(ptr<ast::ForStatement> ast)
     for(auto i = 0; i < numTargets; i++) {
         assert(isa<VarDecl>(ast->targetList.at(i)));
         auto vdecl = as<VarDecl>(ast->targetList.at(i));
-        currentNode = vdecl;
+        SourceNodeScope targetSource(*this, vdecl);
         auto name = vdecl->name;
         std::optional<VarTypeSpec> vtype{};
         if (vdecl->varType.has_value()) {
@@ -3887,14 +3886,13 @@ std::any RoxalCompiler::visit(ptr<ast::ForStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::WhenStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     bool emittedTrigger = false;
     if (ast->requiresSignalChange) {
         if (auto variable = dynamic_ptr_cast<ast::Variable>(ast->trigger)) {
-            currentNode = variable;
+            SourceNodeScope triggerSource(*this, variable);
             emittedTrigger = namedVariable(variable->name, /*assign=*/false, /*asSignal=*/true);
-            currentNode = ast;
         }
     }
 
@@ -3954,7 +3952,7 @@ std::any RoxalCompiler::visit(ptr<ast::WhenStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::UntilStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // until <eventExpr>: <stmt>
     //   is compiled as:
@@ -4031,7 +4029,7 @@ std::any RoxalCompiler::visit(ptr<ast::UntilStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::AdheringIfStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // <stmt> if <cond>
     //   is compiled like a no-else if-statement that wraps the entire wrapped
@@ -4058,7 +4056,7 @@ std::any RoxalCompiler::visit(ptr<ast::AdheringIfStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::TryStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     // A 'jump' must not cross this try's handler-teardown — mark the guarded region.
     asFuncScope(funcScope())->guardDepth++;
     // emit handler setup and compile body
@@ -4133,7 +4131,7 @@ std::any RoxalCompiler::visit(ptr<ast::TryStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::MatchStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // Evaluate the match expression once and keep it on the stack
     ast->matchExpr->accept(*this);
@@ -4276,7 +4274,7 @@ std::any RoxalCompiler::visit(ptr<ast::MatchStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::WithStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // The TypeDeducer should have set contextKind and contextType
     if (ast->contextKind == ast::WithStatement::Unknown || !ast->contextType.has_value()) {
@@ -4362,7 +4360,7 @@ void RoxalCompiler::emitComparison(ast::BinaryOp::Op op)
 
 std::any RoxalCompiler::visit(ptr<ast::AssertStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // A comparison condition is evaluated through temporaries so that a failure
     // can report what each side actually was -- the single most useful thing an
@@ -4429,7 +4427,7 @@ std::any RoxalCompiler::visit(ptr<ast::AssertStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::RaiseStatement> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     if (ast->exception.has_value()) {
         ast->exception.value()->accept(*this);
     } else {
@@ -4445,7 +4443,7 @@ std::any RoxalCompiler::visit(ptr<ast::RaiseStatement> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Function> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // A function declared without a body (`func foo()<NEWLINE>`) is abstract.
     // Mark it so the runtime conformance check can distinguish it from a
@@ -4697,7 +4695,7 @@ std::any RoxalCompiler::visit(ptr<ast::Function> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Parameter> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // Signals cannot be const (they exist to change over time)
     if (ast->isConst && ast->type.has_value() && std::holds_alternative<BuiltinType>(*ast->type)
@@ -4944,7 +4942,7 @@ void RoxalCompiler::emitStarInitPrologue(const std::vector<StarInitMember>& memb
 
 std::any RoxalCompiler::visit(ptr<ast::Assignment> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     auto emitRhs = [&]() {
         if (ast->atHost.has_value()) {
             auto callAst = dynamic_ptr_cast<ast::Call>(ast->rhs);
@@ -5280,7 +5278,7 @@ std::any RoxalCompiler::visit(ptr<ast::Assignment> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::BinaryOp> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     bool handled = false;
 
@@ -5361,7 +5359,7 @@ std::any RoxalCompiler::visit(ptr<ast::BinaryOp> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::UnaryOp> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     Anys results {};
 
     // special case for super.<member>
@@ -5457,7 +5455,7 @@ std::any RoxalCompiler::visit(ptr<ast::UnaryOp> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Variable> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     namedVariable(ast->name);
     return {};
 }
@@ -5465,7 +5463,7 @@ std::any RoxalCompiler::visit(ptr<ast::Variable> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Call> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     Anys results {};
 
     // Disallow calling a suffixed literal directly: 10m(...) is an error
@@ -5625,7 +5623,6 @@ std::any RoxalCompiler::visit(ptr<ast::Call> ast)
                 for (auto& a : ast->args)
                     a.second->accept(*this);
 
-                currentNode = ast;
                 CallSpec callSpec = buildCallSpec(ast);
                 auto bytes = callSpec.toBytes();
                 if (bytes.size() == 1)
@@ -5718,7 +5715,6 @@ std::any RoxalCompiler::visit(ptr<ast::Call> ast)
                         accessor->arg->accept(*this);
                         for (auto& a : ast->args)
                             a.second->accept(*this);
-                        currentNode = ast;
                         uint16_t nameConst = identifierConstant(methodName);
                         // Build a single-byte CallSpec (all-positional / matched).
                         CallSpec callSpec = buildCallSpec(ast);
@@ -5760,10 +5756,8 @@ std::any RoxalCompiler::visit(ptr<ast::Call> ast)
         }
     }
 
-    // Restore current node to the call expression so the CALL opcode
-    // emitted below uses the location of the call rather than that of
-    // the final argument.
-    currentNode = ast;
+    // Child source scopes restore the call expression, so the CALL opcode
+    // below is attributed to the call rather than its final argument.
 
     CallSpec callSpec = buildCallSpec(ast);
 
@@ -5857,7 +5851,7 @@ std::any RoxalCompiler::visit(ptr<ast::Call> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Range> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     Anys results {};
 
     // always push 3 values, nil for implicit
@@ -5892,7 +5886,7 @@ std::any RoxalCompiler::visit(ptr<ast::Range> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Index> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     Anys results {};
     ast->acceptChildren(*this, results);
 
@@ -5906,7 +5900,7 @@ std::any RoxalCompiler::visit(ptr<ast::Index> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::LambdaFunc> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     auto func {as<Function>(ast->func) };
 
@@ -5922,7 +5916,7 @@ std::any RoxalCompiler::visit(ptr<ast::LambdaFunc> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Literal> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     // non-Nil typed literals handled by specialized visit methods
     if (ast->literalType==Literal::Nil)
         emitByte(OpCode::ConstNil);
@@ -5934,7 +5928,7 @@ std::any RoxalCompiler::visit(ptr<ast::Literal> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Bool> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     emitByte( ast->value ? OpCode::ConstTrue : OpCode::ConstFalse );
     return {};
 }
@@ -5942,7 +5936,7 @@ std::any RoxalCompiler::visit(ptr<ast::Bool> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Str> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // new ObjString or existing one if exists in strings intern map
     emitConstant(Value::stringVal(ast->str));
@@ -5952,7 +5946,7 @@ std::any RoxalCompiler::visit(ptr<ast::Str> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Type> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     ValueType type { builtinToValueType(ast->t) };
 
     emitConstant(Value::typeVal(type));
@@ -5962,7 +5956,7 @@ std::any RoxalCompiler::visit(ptr<ast::Type> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Num> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     if (std::holds_alternative<double>(ast->num)) {
         emitConstant(Value::realVal(std::get<double>(ast->num)));
@@ -5981,7 +5975,7 @@ std::any RoxalCompiler::visit(ptr<ast::Num> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::SuffixedNum> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     auto* reg = lookupSuffix(ast->suffix);
     if (!reg) {
@@ -6051,7 +6045,7 @@ void RoxalCompiler::emitSuffixCall()
 
 std::any RoxalCompiler::visit(ptr<ast::SuffixedStr> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     if (!emitSuffixCallee(ast->suffix))
         return {};
@@ -6064,7 +6058,7 @@ std::any RoxalCompiler::visit(ptr<ast::SuffixedStr> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::StrInterp> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     const bool suffixed = !ast->suffix.isEmpty();
     if (suffixed && !emitSuffixCallee(ast->suffix))
@@ -6103,7 +6097,7 @@ std::any RoxalCompiler::visit(ptr<ast::StrInterp> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::List> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     Anys results {};
 
     // generate code to eval each elements and leave on stack
@@ -6119,7 +6113,7 @@ std::any RoxalCompiler::visit(ptr<ast::List> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Vector> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // generate code to eval each element and leave on stack
     for(auto& elt : ast->elements)
@@ -6135,7 +6129,7 @@ std::any RoxalCompiler::visit(ptr<ast::Vector> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Matrix> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
 
     // generate code for each row vector
     for(auto& row : ast->rows)
@@ -6151,7 +6145,7 @@ std::any RoxalCompiler::visit(ptr<ast::Matrix> ast)
 
 std::any RoxalCompiler::visit(ptr<ast::Dict> ast)
 {
-    currentNode = ast;
+    SourceNodeScope sourceScope(*this, ast);
     Anys results {};
 
     // generate code to eval each key & value and leave on stack
@@ -6942,9 +6936,9 @@ static std::string linePos(ptr<AST> node)
 //  (use throw std::runtime_error for internal compiler errors)
 void RoxalCompiler::error(const std::string& message)
 {
-    if (!currentNode)
+    if (!currentNode())
         throw std::logic_error(message);
-    throw std::logic_error(linePos(currentNode) + " - " + message);
+    throw std::logic_error(linePos(currentNode()) + " - " + message);
 }
 
 
@@ -6987,32 +6981,32 @@ void RoxalCompiler::emitTypeName(const ast::TypeName& components)
 
 void RoxalCompiler::emitByte(uint8_t byte, const std::string& comment)
 {
-    currentChunk()->write(byte, currentNode->interval.first.line,
-                          currentNode->interval.first.pos, comment);
+    currentChunk()->write(byte, currentNode()->interval.first.line,
+                          currentNode()->interval.first.pos, comment);
 }
 
 
 void RoxalCompiler::emitByte(OpCode op, const std::string& comment)
 {
-    currentChunk()->write(asByte(op), currentNode->interval.first.line,
-                          currentNode->interval.first.pos, comment);
+    currentChunk()->write(asByte(op), currentNode()->interval.first.line,
+                          currentNode()->interval.first.pos, comment);
 }
 
 
 void RoxalCompiler::emitBytes(uint8_t byte1, uint8_t byte2, const std::string& comment)
 {
-    currentChunk()->write(byte1, currentNode->interval.first.line,
-                          currentNode->interval.first.pos, comment);
-    currentChunk()->write(byte2, currentNode->interval.first.line,
-                          currentNode->interval.first.pos);
+    currentChunk()->write(byte1, currentNode()->interval.first.line,
+                          currentNode()->interval.first.pos, comment);
+    currentChunk()->write(byte2, currentNode()->interval.first.line,
+                          currentNode()->interval.first.pos);
 }
 
 void RoxalCompiler::emitBytes(OpCode op, uint8_t byte2, const std::string& comment)
 {
-    currentChunk()->write(op, currentNode->interval.first.line,
-                          currentNode->interval.first.pos, comment);
-    currentChunk()->write(byte2, currentNode->interval.first.line,
-                          currentNode->interval.first.pos);
+    currentChunk()->write(op, currentNode()->interval.first.line,
+                          currentNode()->interval.first.pos, comment);
+    currentChunk()->write(byte2, currentNode()->interval.first.line,
+                          currentNode()->interval.first.pos);
 }
 
 void RoxalCompiler::emitBytes(OpCode op, uint8_t byte2, uint8_t byte3, const std::string& comment)
@@ -7024,12 +7018,12 @@ void RoxalCompiler::emitBytes(OpCode op, uint8_t byte2, uint8_t byte3, const std
                 " with double-byte argument.",
             OutputSeverity::Warning, "compiler.bytecode");
     #endif
-    currentChunk()->write(op, currentNode->interval.first.line,
-                          currentNode->interval.first.pos, comment);
-    currentChunk()->write(byte2, currentNode->interval.first.line,
-                          currentNode->interval.first.pos);
-    currentChunk()->write(byte3, currentNode->interval.first.line,
-                          currentNode->interval.first.pos);
+    currentChunk()->write(op, currentNode()->interval.first.line,
+                          currentNode()->interval.first.pos, comment);
+    currentChunk()->write(byte2, currentNode()->interval.first.line,
+                          currentNode()->interval.first.pos);
+    currentChunk()->write(byte3, currentNode()->interval.first.line,
+                          currentNode()->interval.first.pos);
 }
 
 uint8_t RoxalCompiler::lastByte()
@@ -7537,7 +7531,7 @@ void RoxalCompiler::declareVariable(const ustring& name, std::optional<VarTypeSp
         if (constIt != module->moduleConstLines.end()) {
             error("A const with this name already exists in this scope (previously declared at line " + std::to_string(constIt->second.line) + ").");
         }
-        module->moduleVarLines[name] = currentNode->interval.first;
+        module->moduleVarLines[name] = currentNode()->interval.first;
         if (type.has_value())
             module->moduleVarTypes[name] = type.value();
         return;
@@ -7595,8 +7589,8 @@ void RoxalCompiler::declareConstant(const ustring& name, const Value& value, std
         ObjModuleType* moduleTypeObj = asModuleType(module->moduleType);
         moduleTypeObj->constVars.insert(name.hashCode());
 
-        module->moduleConstLines[name] = currentNode->interval.first;
-        module->moduleVarLines[name] = currentNode->interval.first;
+        module->moduleConstLines[name] = currentNode()->interval.first;
+        module->moduleVarLines[name] = currentNode()->interval.first;
         if (type.has_value())
             module->moduleVarTypes[name] = type.value();
     }
@@ -7614,7 +7608,7 @@ void RoxalCompiler::declareConstant(const ustring& name, const Value& value, std
     }
 
     auto& constMap = func->constBindings.back();
-    auto [it, inserted] = constMap.emplace(name, FunctionScope::ConstBinding{value, currentNode->interval.first});
+    auto [it, inserted] = constMap.emplace(name, FunctionScope::ConstBinding{value, currentNode()->interval.first});
     if (!inserted)
         error("A const with this name already exists in this scope.");
 }
@@ -7997,7 +7991,7 @@ bool RoxalCompiler::namedVariable(const ustring& name, bool assign, bool asSigna
         else
             setOp = OpCode::SetNewModuleVar;
         if (assign && inModuleFunction && !exists)
-            module->moduleVarLines[name] = currentNode->interval.first;
+            module->moduleVarLines[name] = currentNode()->interval.first;
 
         // Actor methods may not access mutable module state, but an actor's own
         // member has lexical precedence over an unrelated module variable with

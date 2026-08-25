@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cassert>
 #include <stack>
+#include <utility>
 #include <unordered_set>
 #include <unordered_map>
 #include <optional>
@@ -612,7 +614,36 @@ protected:
         return asFunction(asFuncScope(funcScope())->function)->chunk;
     }
 
-    ptr<ast::AST> currentNode;
+    // Source attribution follows AST traversal nesting.  Each visitor (and
+    // synthetic-emission site associated with a sub-node) pushes a scope;
+    // child scopes restore the parent automatically on every exit path.
+    std::vector<ptr<ast::AST>> sourceNodeStack;
+
+    class SourceNodeScope {
+    public:
+        SourceNodeScope(RoxalCompiler& compiler, ptr<ast::AST> node)
+            : compiler(compiler), depth(compiler.sourceNodeStack.size())
+        {
+            compiler.sourceNodeStack.push_back(std::move(node));
+        }
+
+        ~SourceNodeScope()
+        {
+            assert(compiler.sourceNodeStack.size() == depth + 1);
+            compiler.sourceNodeStack.resize(depth);
+        }
+
+        SourceNodeScope(const SourceNodeScope&) = delete;
+        SourceNodeScope& operator=(const SourceNodeScope&) = delete;
+
+    private:
+        RoxalCompiler& compiler;
+        size_t depth;
+    };
+
+    ptr<ast::AST> currentNode() const {
+        return sourceNodeStack.empty() ? nullptr : sourceNodeStack.back();
+    }
 
     // True while unwinding a compile error (cleanup of scopes). Suppresses the
     // unresolved-'jump' check so error cleanup doesn't throw a second time.

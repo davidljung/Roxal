@@ -1,0 +1,7 @@
+type Example object:
+  var duplicate = 1
+  var duplicate = [
+    2
+  ]
+
+Example()

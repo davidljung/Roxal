@@ -1,0 +1,1 @@
+.*source_attribution_destructure_err\.rox:2:0: error: Elements of LHS list of binding assignment must be variables, property accessors or indexing.*
